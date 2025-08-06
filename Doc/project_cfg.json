@@ -1,0 +1,11 @@
+{
+    "signal_cfg" : "D:\\Project\\Software\\STM32\\Gamma_fCreateCfg\\Doc\\ConfigPrj\\MessagingCfg\\PrjMsgDefinition.sym",
+    "serial_cfg" : {
+        "port_com" : "COM3",
+        "baudrate" : "115200",
+        "is_enable" : true,
+        "frame_len" : 11
+    }
+    
+
+}

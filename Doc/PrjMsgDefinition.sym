@@ -1,0 +1,48 @@
+FormatVersion=6.0 // Do not edit this line!
+Title="Untitled"
+
+{ENUMS}
+Enum=module_state(0="STATE_CYCLIC_CFG", 1="STATE_CYCLIC_PREOPE", 2="STATE_CYCLIC_OPE", 3="STATE_CYCLIC_BUSY",
+  4="STATE_CYCLIC_WAITING", 5="STATE_CYCLIC_ERROR")
+
+{SIGNALS}
+Sig=FmkCpu_ModState unsigned 3 /e:module_state
+Sig=FmkCda_ModState unsigned 3 /e:module_state
+Sig=FmkSrl_ModState unsigned 3 /e:module_state
+Sig=FmkFdcan_ModState unsigned 3 /e:module_state
+Sig=FmkIo_ModState unsigned 3 /e:module_state
+Sig=FmkHrt_ModState unsigned 3 /e:module_state
+Sig=FmkTim_ModState unsigned 3 /e:module_state
+Sig=AppSig_ModState unsigned 3 /e:module_state
+Sig=AppSys_ModState unsigned 3 /e:module_state
+Sig=AppSns_ModState unsigned 3 /e:module_state
+Sig=AppAct_ModState unsigned 3 /e:module_state
+Sig=AppLgc_ModState unsigned 3 /e:module_state
+Sig=AppSdm_ModState unsigned 3 /e:module_state
+Sig=AppSpm_ModState unsigned 3 /e:module_state
+Sig=Cyclic_Duration unsigned 11 /max:511
+Sig=FastTaskDuration unsigned 11 /max:511
+
+{SEND}
+
+[ApplicationInfo1]
+ID=010h // SRL
+Len=8
+CycleTime=500
+Sig=FmkCpu_ModState 0
+Sig=AppAct_ModState 3
+Sig=AppLgc_ModState 6
+Sig=AppSdm_ModState 9
+Sig=AppSig_ModState 12
+Sig=AppSns_ModState 15
+Sig=AppSpm_ModState 18
+Sig=AppSys_ModState 21
+Sig=FmkCda_ModState 24
+Sig=FmkFdcan_ModState 27
+Sig=FmkHrt_ModState 30
+Sig=FmkIo_ModState 33
+Sig=FmkSrl_ModState 36
+Sig=FmkTim_ModState 39
+Sig=Cyclic_Duration 42
+Sig=FastTaskDuration 53
+
