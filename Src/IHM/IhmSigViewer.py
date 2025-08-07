@@ -12,14 +12,22 @@
 #------------------------------------------------------------------------------
 import sys
 import os
-from PyQt6.QtWidgets import (
+"""from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QPushButton,
     QVBoxLayout, QWidget, QTabWidget
 )
 from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QColor, QBrush
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
+from PyQt6.QtGui import QColor, QBrush"""
+
+import sys
+import os
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QPushButton,
+    QVBoxLayout, QWidget, QTabWidget
+)
+from PyQt5.QtCore import QTimer
+from PyQt5.QtGui import QColor, QBrush
+
 import pyqtgraph as pg
 
 
@@ -90,6 +98,11 @@ class SignalViewer(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.__refresh_table)
         self.timer.start(REFRESH_IMH_SECONDS)  # toutes les 0.3s
+        
+        self._timer_interrupt = QTimer()
+        self._timer_interrupt.start(500)  # 500 ms
+        self._timer_interrupt.timeout.connect(lambda: None)  
+
 
     #--------------------------
     # kill_all_thread

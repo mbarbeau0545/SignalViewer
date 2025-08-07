@@ -17,13 +17,16 @@ import re
 from typing import Dict, List, Optional
 from queue import Queue, Empty
 
-from Protocole.SerialMngmt import SerialMngmt, SerialError
+
+import importlib
+from Protocole.CAN.Mngmt.CanMngmt import CanMngmt, DriverCanUsed, StructCANMsg
+from Protocole.SERIAL.SerialMngmt import SerialMngmt, SerialError
 #------------------------------------------------------------------------------
 #                                       CONSTANT
 #------------------------------------------------------------------------------
-PATTERN_ENUM = r'(\d+)="([^"]+)"'
+SYM_PATTERN_ENUM = r'(\d+)="([^"]+)"'
 PATTERN_SIGNAL = re.compile(
-    r"Sig=(\w+)\s+unsigned\s+(\d+)"                  # nom et longueur
+    r"Sig=(\w+)\s+unsigned\s+(\d+)"                  # nom et len
     r"(?:\s+(-m))?"                                  # encodage
     r"(?:\s+/f:(\d+))?"                              # factor
     r"(?:\s+/o:(\d+))?"                              # offset
@@ -31,9 +34,15 @@ PATTERN_SIGNAL = re.compile(
     r"(?:\s+/e:(\w+))?"                              # enum
 )
 
-PATTERN_SYM_ID = re.compile(r'ID=([0-9A-Fa-f]+)h\s*//\s*(\w+)')
-PATTERN_SYM_LEN = re.compile(r'Len=(\d+)')
-PATTERN_SYM_SIG = re.compile(r'Sig=(\w+)\s+(\d+)')
+SYM_PATTERN_ID = re.compile(r'ID=([0-9A-Fa-f]+)h\s*//\s*(\w+)')
+SYM_PATTERN_LEN = re.compile(r'Len=(\d+)')
+SYM_PATTERN_SIG = re.compile(r'Sig=(\w+)\s+(\d+)')
+
+DBC_SYM_PATTERN = re.compile(r'^BO_\s+(\d+)\s+(\w+):\s+(\d+)\s+\S+')
+DBC_SIG_PATTERN = re.compile(r'^SG_\s+(\w+)\s+(\w+)\s*:\s*(\d+)\|(\d+)@(\d)([+-])\s+\(([^,]+),([^)]+)\)\s+\[([^|]+)\|([^\]]+)\]\s+"([^"]*)"\s+(\S+)$')
+DBC_ENM_PATTERN = re.compile(r'^VAL_TABLE_\s+(\w+)\s+(\d+)\s+(.*);$')
+DBC_ENM_VAL_PATTERN = re.compile(r'(\d+)\s+"([^"]+)"')
+DBV_ENM_AFECT_PATTERN = re.compile(r'^VAL_\s+\d+\s+(\w+)\s+(\d+)')
 
 MSG_TYPE_MAPPING = {
     'RECEIVE' : 'APPSIG_MSG_DIR_RX',
@@ -58,24 +67,33 @@ class FrameMngmt():
         
         with open(f_prjcfg_file, "r") as file:
             prj_cfg_data = json.load(file)
-        
+
+        pcan_module = importlib.import_module("Protocole.CAN.Drivers.Peak.Src.PCANBasic")
+
         try:
             self.sigcfg_file = prj_cfg_data["signal_cfg"]
-            baudrate:int = prj_cfg_data["serial_cfg"]["baudrate"]
-            protcom:str = prj_cfg_data["serial_cfg"]["port_com"]
+            srl_baudrate:int = prj_cfg_data["serial_cfg"]["baudrate"]
+            srl_protcom:str = prj_cfg_data["serial_cfg"]["port_com"]
+            can_baudrate:int = getattr(pcan_module, prj_cfg_data["can_cfg"]["baudrate"])
+            can_protcom:int  = getattr(pcan_module, prj_cfg_data["can_cfg"]["usb_bus"])
+
             self._is_serial_enable:bool = prj_cfg_data["serial_cfg"]["is_enable"]
             self._srl_frame_len:int = prj_cfg_data["serial_cfg"]["frame_len"]
 
-        except (KeyError, TypeError) as e:
+            self._is_can_enable:bool = prj_cfg_data["can_cfg"]["is_enable"]
+
+        except (KeyError, TypeError, AttributeError) as e:
             raise Exception(f'An error occured while extracting config project -> {e}')
         
+        # also get the offset master stuff ^^ 
+        self._idx_mux_offset = prj_cfg_data["db_mater_cfg"].get("offset_idx_mux", 0)
         # serial managment #
-        self._serial_istc = SerialMngmt(baudrate, protcom, self.__error_serial_cb)
-        self.sigcfg_file
+        self._serial_istc = SerialMngmt(srl_baudrate, srl_protcom, self.__error_serial_cb)
+        self._can_istc = CanMngmt(DriverCanUsed.DrvLibrary32bit, can_baudrate, can_protcom, False, f_error_cb=self.__error_can_cb )
 
-        # signal maangment
+        # signals maangment
         self.enum:Dict[str, List[List[int]]] = {}
-        self.signal:Dict[str, Dict] = {}
+        self.signals:Dict[str, Dict] = {}
         self.sig_value:Dict[str, Queue] = {}
         self.symbol:Dict[str, Dict] = {}
         self.list_id = {
@@ -85,7 +103,9 @@ class FrameMngmt():
 
         # thread maangment 
         self._srl_frame_thread: Optional[threading.Thread] = None
+        self._can_frame_thread: Optional[threading.Thread] = None
         self._stop_srl_thread = threading.Event()
+        self._stop_can_thread = threading.Event()
 
         #---- extract signals enum and stuff ----#
         self.__extract_signal_cfg()
@@ -94,13 +114,13 @@ class FrameMngmt():
     # get_signal_value
     #--------------------------
     def get_signal_value(self, f_signal: str) -> List[int]:
-        """Get the Queue of values for a given signal.
+        """Get the Queue of values for a given signals.
         Args:
-            f_signal (str): the name of the signal.
+            f_signal (str): the name of the signals.
         Returns:
             List: a list of x element containing rawValue and ValueCompute [[1,4, timestamp], [5,20, timestamps]].
         Raises:
-            KeyError: if the signal is not found.
+            KeyError: if the signals is not found.
         """
         result = [[]]
         sig_queue = self.sig_value.get(f_signal)
@@ -121,15 +141,15 @@ class FrameMngmt():
     # get_signal_value
     #--------------------------
     def get_signal_list(self) -> List[str]:
-        """Get a signal value
+        """Get a signals value
 
         Args:
-            f_signal (str): the signal
+            f_signal (str): the signals
         Returns:
             List[str]: the list with all signals
         """
         
-        return [str(signal_name) for signal_name in self.signal.keys()]
+        return [str(signal_name) for signal_name in self.signals.keys()]
 
     def perform_cyclic(self)->None:
         """Start opening serial & can gate (depending on configuration)
@@ -143,6 +163,12 @@ class FrameMngmt():
             self._srl_frame_thread = threading.Thread(target=self._cyclic_serial_frame, daemon=True)
             self._srl_frame_thread.start()
 
+        if self._is_can_enable:
+            self._can_istc.initiliaze_drv()
+            self._stop_can_thread.clear()
+            self._can_frame_thread = threading.Thread(target=self._cyclic_can_frame, daemon=True)
+            self._can_frame_thread.start()
+
         # idem can
     
     #--------------------------
@@ -153,8 +179,10 @@ class FrameMngmt():
         """
         self._serial_istc.stop()
         self._stop_srl_thread.set()
+
+        self._can_istc.uninitialize_drv()
     #--------------------------
-    # __interpret_frame
+    # _cyclic_serial_frame
     #--------------------------
     def _cyclic_serial_frame(self)->None:
         """Interpret a frame and put the value into signals
@@ -169,6 +197,25 @@ class FrameMngmt():
             srl_frame = self._serial_istc.get_frame()
             if srl_frame is not None:
                 self.__decode_srl_frame(srl_frame)
+            time.sleep(0.01)
+
+    
+    #--------------------------
+    # _cyclic_serial_frame
+    #--------------------------
+    def _cyclic_can_frame(self)->None:
+        """Interpret a frame and put the value into signals
+
+        Args:
+            bytes (bytes): frame bytes
+            len_frame (int):len of the frame
+
+        Raises:
+        """
+        while not self._stop_can_thread.is_set():
+            can_frame = self._can_istc.read_can()
+            if can_frame.data != []:
+                self.__decode_can_frame(can_frame)
             time.sleep(0.01)
                 
 
@@ -203,7 +250,7 @@ class FrameMngmt():
         signals:Dict = symbol['signals']  # dict signal_name -> bit position
 
         for signal_name, start_bit in signals.items():
-            sig_conf = self.signal.get(signal_name)
+            sig_conf = self.signals.get(signal_name)
             if not sig_conf:
                 print(f"[ERROR] : Signal {signal_name} not configured")
                 continue
@@ -214,7 +261,7 @@ class FrameMngmt():
             offset = sig_conf.get('offset', 0)
             enum_name = sig_conf.get('enum')
 
-            # Extraire la valeur brute du signal (bitfield)
+            # Extraire la valeur brute du signals (bitfield)
             raw_value = self.__extract_bits(f_srl_frame[3:], start_bit, length, encoding)
 
             # Si enum est défini, traduire la valeur
@@ -232,11 +279,85 @@ class FrameMngmt():
             self.sig_value[signal_name].put([raw_value, value, current_time])
 
     #--------------------------
+    # __decode_can_frame
+    #--------------------------
+    def __decode_can_frame(self, f_can_frame:StructCANMsg)->None:
+        """Interpret a serial frame into signals value
+        Args: 
+            f_srl_frame (bytes); the frame to decode
+        Raises:
+        """
+        current_time = time.time_ns()
+        msg_id = f_can_frame.id  
+
+        # Recherche du symbole correspondant à msg_id
+        symbol = None
+        for sym_name, sym in self.symbol.items():
+            if sym['msg_id'] == msg_id:
+                symbol = sym
+                break
+
+        if symbol is None:
+            print(f"[ERROR] : Symbole inconnu pour msg_id {msg_id}")
+            return
+
+        
+        raw_data = bytes([int(byte) for byte in list(f_can_frame.data)])
+
+
+        #---- no mux use ----#
+        if symbol['mux_info'] == {}:
+            signals:Dict = symbol['signals']['0']
+        #---- find value ----#
+        else:
+            idx_mux:int = self.__extract_bits(bytes(raw_data), 
+                                                    symbol['mux_info']['start_bit'], 
+                                                    symbol['mux_info']['length'],
+                                                    symbol['mux_info']['encoding'])
+            if idx_mux >= self._idx_mux_offset:
+                idx_mux -= self._idx_mux_offset
+            else:
+                print('[ERROR] : idx mux offset out of range')
+
+            signals:Dict = symbol['signals'][str(idx_mux)]
+
+
+        for signal_name, start_bit in signals.items():
+            sig_conf = self.signals.get(signal_name)
+            if not sig_conf:
+                print(f"[ERROR] : Signal {signal_name} not configured")
+                continue
+
+            length = sig_conf['length']
+            encoding = sig_conf['encoding']
+            factor = sig_conf.get('factor', 1)
+            offset = sig_conf.get('offset', 0)
+            enum_name = sig_conf.get('enum')
+
+            # Extraire la valeur brute du signals (bitfield)
+            raw_value = self.__extract_bits(raw_data, start_bit, length, encoding)
+
+            # Si enum est défini, traduire la valeur
+            if enum_name and enum_name in self.enum:
+                enum_map = {entry[0]: entry[1] for entry in self.enum[enum_name]}
+                value = enum_map.get(raw_value, raw_value)  # sinon valeur brute
+
+            else:
+                # Appliquer facteur et offset
+                value = raw_value * factor + offset
+
+            # Stocker la valeur dans la queue associée
+            if signal_name not in self.sig_value:
+                self.sig_value[signal_name] = Queue()
+            self.sig_value[signal_name].put([raw_value, value, current_time])
+
+
+    #--------------------------
     # __extract_bits
     #--------------------------
     def __extract_bits(self, data: bytes, start_bit: int, length: int, encoding: str) -> int:
         """
-        Extrait un champ de bits d'une trame en fonction de son start_bit et de sa longueur.
+        Extrait un champ de bits d'une trame en fonction de son start_bit et de sa len.
 
         Args:
             data (bytes): trame binaire (ex: 8 octets CAN/SRL)
@@ -273,6 +394,7 @@ class FrameMngmt():
             bit_val |= (bit << i)
 
         return bit_val
+
     #--------------------------
     # __interpret_frame
     #--------------------------
@@ -284,12 +406,43 @@ class FrameMngmt():
             print("[ERROR] : Stopping serial thread in FrameMngmt")
         else:
             print('[WARNING] : Timeout occured in SerialMngmt, did not receive any frame...')
+    
+     #--------------------------
+    # __interpret_frame
+    #--------------------------
+    def __error_can_cb(self, f_type_error:SerialError):
+        """Management of serial line whenever an error occured
+        """
+        if f_type_error == SerialError.SerialErrorLost:
+            self._stop_can_thread.set()
+            print("[ERROR] : Stopping serial thread in FrameMngmt")
+        else:
+            print('[WARNING] : Timeout occured in SerialMngmt, did not receive any frame...')
     #--------------------------
     # __extract_signal_cfg
     #--------------------------
     def __extract_signal_cfg(self):
         """
-            @brief get enum, signal, symbol from .sym 
+            @brief get enum, signals, symbol from can signals config 
+        """
+ 
+        if not os.path.isfile(self.sigcfg_file):
+            raise FileNotFoundError(f'Signal Config file doest not exits {self.sigcfg_file}')
+        
+        if str(self.sigcfg_file).endswith(".sym"):
+            self.__sym_reader()
+
+        elif str(self.sigcfg_file).endswith(".dbc"):
+            self.__database_can_reader()
+
+        else:
+            raise Exception(f'Cannot found any function that interpret {self.sigcfg_file[str(self.sigcfg_file).index("."):]}')
+    #--------------------------
+    # __sym_reader
+    #--------------------------
+    def __sym_reader(self):
+        """
+            @brief get enum, signals, symbol from .sym file
         """
         current_read = 'NONE'
         waiting_for_timeout = False
@@ -297,6 +450,7 @@ class FrameMngmt():
         current_type = None
         current_len = None
         current_symbol = None
+        curr_idx_mux = '0'
 
         with open(self.sigcfg_file, 'r') as file:
             file_iter = iter(file)
@@ -334,7 +488,7 @@ class FrameMngmt():
                             enum_name = full_line[start_index:end_index].strip()
 
                             # Étape 3 : extraire les paires index = "value"
-                            resultats = re.findall(PATTERN_ENUM, full_line)
+                            resultats = re.findall(SYM_PATTERN_ENUM, full_line)
                             pairs = [[int(index), value] for index, value in resultats]
 
                             # Étape 4 : stocker
@@ -344,7 +498,7 @@ class FrameMngmt():
                         match = PATTERN_SIGNAL.match(line)
                         if match:
                             nom_signal    = match.group(1)
-                            longueur      = int(match.group(2))
+                            len_sig      = int(match.group(2))
                             encoding_flag = match.group(3)
                             factor        = int(match.group(4)) if match.group(4) else 1
                             offset        = int(match.group(5)) if match.group(5) else 0
@@ -353,15 +507,16 @@ class FrameMngmt():
 
                             encoding = "MOTOROLA" if encoding_flag else "INTEL"
                             self.sig_value[nom_signal] = Queue()
-                            self.signal[nom_signal] = {
-                                'length': longueur,
+                            self.signals[nom_signal] = {
+                                'length': len_sig,
                                 'encoding': encoding,
                                 'factor': factor,
                                 'offset': offset,
-                                'enum': enum_name
+                                'enum': enum_name,
+                                'unit' : None
                             }
                         else:
-                            print(f'[INFO] : APPSIG_Codegen : While in SIGNALS, no signal pattern in line: {line.strip()}')
+                            print(f'[INFO] : APPSIG_Codegen : While in SIGNALS, no signals pattern in line: {line.strip()}')
 
                     case 'SEND' | 'RECEIVE' | 'SENDRECEIVE':
                         if line.startswith('['):  # Ex: [Symbol1]
@@ -375,13 +530,14 @@ class FrameMngmt():
                                 'msg_type': None,
                                 'msg_direction': current_read,
                                 'signals': {},
+                                'mux_info' : {},
                                 'timeout': 0,
                                 'cycle_time': None  # <-- Ajouté ici
                             }
                             waiting_for_timeout = True
                             continue
 
-                        match_id = PATTERN_SYM_ID.match(line)
+                        match_id = SYM_PATTERN_ID.match(line)
                         if match_id:
                             current_id = match_id.group(1)
                             current_type = match_id.group(2)
@@ -395,15 +551,15 @@ class FrameMngmt():
                                 self.list_id[current_type].append(current_id)
 
                             if current_symbol:
-                                self.symbol[current_symbol]['msg_id'] = current_id
-                                self.symbol[current_symbol]['msg_type'] = current_type
+                                self.symbol[current_symbol]['msg_id'] = int(current_id)
+                                self.symbol[current_symbol]['msg_type'] = int(current_type)
                             continue
 
-                        match_len = PATTERN_SYM_LEN.match(line)
+                        match_len = SYM_PATTERN_LEN.match(line)
                         if match_len:
                             current_len = int(match_len.group(1))
                             if current_symbol:
-                                self.symbol[current_symbol]['msg_len'] = current_len
+                                self.symbol[current_symbol]['msg_len'] = int(current_len)
                             continue
 
                         # Nouveau bloc : Timeout
@@ -412,7 +568,7 @@ class FrameMngmt():
                             if current_symbol:
                                 if timeout_val == 0:
                                     raise ValueError(f"Timeout cannot be 0 for symbol '{current_symbol}'")
-                                self.symbol[current_symbol]['timeout'] = timeout_val
+                                self.symbol[current_symbol]['timeout'] = int(timeout_val)
                                 waiting_for_timeout = False
                             continue
 
@@ -422,37 +578,41 @@ class FrameMngmt():
                             if current_symbol and (current_read == 'SEND' or current_read == 'SENDRECEIVE') :
                                 if cycle_val == 0:
                                     raise ValueError(f"CycleTime cannot be 0 for symbol '{current_symbol}'")
-                                self.symbol[current_symbol]['cycle_time'] = cycle_val
+                                self.symbol[current_symbol]['cycle_time'] = int(cycle_val)
                             continue
 
-                        # Ligne signal
-                        match_sig = PATTERN_SYM_SIG.match(line)
+                        # Ligne signals
+                        match_sig = SYM_PATTERN_SIG.match(line)
                         if match_sig:
                             signal_name = match_sig.group(1)
                             position = int(match_sig.group(2))
 
                             if current_symbol:
-                                # Vérifier si le signal est bien défini
-                                if signal_name not in self.signal:
+                                # Vérifier si le signals est bien défini
+                                if signal_name not in self.signals:
                                     raise ValueError(f"Signal '{signal_name}' utilisé par '{current_symbol}' non défini dans SIGNALS")
 
                                 new_start = position
-                                new_length = self.signal[signal_name]['length']
+                                new_length = self.signals[signal_name]['length']
 
-                                for existing_signal, existing_start in self.symbol[current_symbol]['signals'].items():
-                                    existing_length = self.signal[existing_signal]['length']
+                                for idx_mux, mux_signals in self.symbol[current_symbol].items():
+                                    for existing_signal, existing_start in mux_signals:
+                                        existing_length = self.signals[existing_signal]['length']
 
-                                    new_end = new_start + new_length - 1
-                                    existing_end = existing_start + existing_length - 1
+                                        new_end = new_start + new_length - 1
+                                        existing_end = existing_start + existing_length - 1
 
-                                    if not (new_end < existing_start or existing_end < new_start):
-                                        raise ValueError(
-                                            f"Conflit dans '{current_symbol}': signal '{signal_name}' (bits {new_start}-{new_end}) "
-                                            f"chevauche '{existing_signal}' (bits {existing_start}-{existing_end})"
-                                        )
+                                        if not (new_end < existing_start or existing_end < new_start):
+                                            raise ValueError(
+                                                f"Conflit dans '{current_symbol}': signals '{signal_name}' (bits {new_start}-{new_end}) "
+                                                f"chevauche '{existing_signal}' (bits {existing_start}-{existing_end})"
+                                            )
 
-                                # Pas de conflit, on ajoute le signal
-                                self.symbol[current_symbol]['signals'][signal_name] = position
+                                # Pas de conflit, on ajoute le signals
+                                if curr_idx_mux not in self.symbol[current_symbol]['signals'].keys():
+                                    self.symbol[current_symbol]['signals'][curr_idx_mux] = {}
+
+                                self.symbol[current_symbol]['signals'][curr_idx_mux][signal_name] = int(position)
 
                             continue
 
@@ -465,6 +625,134 @@ class FrameMngmt():
                     if sym['cycle_time'] is None:
                         raise ValueError(f"Missing CycleTime for last symbol '{current_symbol}'")
     
+    #--------------------------
+    # __database_can_reader
+    #--------------------------
+    def __database_can_reader(self):
+        """
+            @brief get enum, signals, symbol from .sym file
+        """
+        idxenm_to_string = {}
+        current_read:str = ''
+        current_symbol:str =  ''
+        with open(self.sigcfg_file, 'r') as file:
+            lines = file.readlines()
+
+        for line in lines:
+
+            if str(line).upper().startswith('BO_ '):
+                match = re.match(DBC_SYM_PATTERN, line.strip())
+
+                if not match:
+                    print(f'[INFO] : {line} does not match the symbol pattern')
+                else:
+                    sym_name = match.group(2)
+                    msg_id = match.group(1)
+                    msg_len = match.group(3)
+                    self.symbol[sym_name] = {
+                        "msg_id" : int(msg_id),
+                        "msg_len" : int(msg_len),
+                        "msg_type" : None,
+                        "msg_direction" : None,
+                        'signals': {},
+                        'mux_info' : {},
+                        'timeout': 0,
+                        'cycle_time': None
+                    }
+                    current_symbol = sym_name
+
+                current_read = 'SYMBOLE'
+                continue
+
+            elif str(line).upper().startswith('BU_:'):
+                current_read = 'ENUM'
+                continue
+
+            elif str(line).upper().startswith('VAL_ '):
+                current_read = 'AFFECT_ENUM'
+
+            match current_read:
+                case 'ENUM':
+                    match = re.match(DBC_ENM_PATTERN, line.strip())
+                    if not match:
+                        continue
+                    
+                    else:
+                        enum_name = match.group(1)
+                        enum_idx = match.group(2)
+                        table_val = match.group(3)
+                        idxenm_to_string[str(enum_idx)] = enum_name
+                        results = re.findall(DBC_ENM_VAL_PATTERN, table_val)
+                        pairs = [[int(index), value] for index, value in results]
+                        self.enum[enum_name] = pairs
+
+
+
+                case 'AFFECT_ENUM':
+                    match = re.match(DBV_ENM_AFECT_PATTERN, line.strip())
+                    if not match:
+                        print(f'[INFO] : {line} does not match the signal-enum affectation pattern')
+
+                    else:
+                        sig_name = match.group(1)
+                        enum_idx = match.group(2)
+
+                        if not sig_name in self.signals.keys():
+                            print(f'[INFO] : Found an enum asoo but signal {sig_name} is not register')
+                        else:
+                            self.signals[sig_name]['enum'] = idxenm_to_string[str(enum_idx)]
+
+                case 'SYMBOLE':
+                    if "SG_" in line.upper():
+                        match = re.match(DBC_SIG_PATTERN, line.strip())
+
+                        if not match:
+                            print(f'[INFO] : {line} does not match the signal pattern')
+                        
+                        else:
+                            sig_name        = match.group(1)
+                            idx_multiplexer = match.group(2)
+                            start_bit       = match.group(3)
+                            len_sig         = int(match.group(4))
+                            factor          = int(match.group(7)) if match.group(7) else 1
+                            offset          = int(match.group(8)) if match.group(8) else 0
+                            encoding        = 'INTEL' if match.group(5) == "1" else 'MOTOROLA'
+                            unit            = match.group(11)
+
+                            #--- Info about the mux ----#
+                            if str(idx_multiplexer).upper() == 'M':
+                                self.symbol[current_symbol]['mux_info'] = {
+                                    'length' : int(len_sig),
+                                    'start_bit' : int(start_bit),
+                                    'encoding': encoding
+                                }
+                            else:
+                                #--- filled signal information ----#
+                                if sig_name not in self.signals.keys():
+                                    self.signals[sig_name] = {
+                                        'length': int(len_sig),
+                                        'encoding': encoding,
+                                        'factor': int(factor),
+                                        'offset': int(offset),
+                                        'unit' : unit
+                                    }
+                                    self.sig_value[sig_name] = Queue()
+                                #--- filled symbol information ----#
+                                if idx_multiplexer == None:
+                                    idx_multiplexer = '0'
+                                else:
+                                    idx_multiplexer = str(idx_multiplexer)[1:]
+
+                                if idx_multiplexer not in self.symbol[current_symbol]['signals'].keys():
+
+                                    self.symbol[current_symbol]['signals'][idx_multiplexer] = {}
+                                
+                                self.symbol[current_symbol]['signals'][idx_multiplexer][sig_name] = int(start_bit)
+
+
+                case _:
+                    pass
+
 #------------------------------------------------------------------------------
 #                             FUNCTION IMPLMENTATION
 #------------------------------------------------------------------------------

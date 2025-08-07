@@ -1,10 +1,18 @@
 {
-    "signal_cfg" : "D:\\Project\\Software\\STM32\\Gamma_fCreateCfg\\Doc\\ConfigPrj\\MessagingCfg\\PrjMsgDefinition.sym",
+    "signal_cfg" : "C:\\PROJECT\\0_SOFWTARE\\3_Pyhton\\SignalViewer\\Doc\\Runnable_AppBtInterface_CSL.dbc",
     "serial_cfg" : {
         "port_com" : "COM3",
         "baudrate" : "115200",
-        "is_enable" : true,
+        "is_enable" : false,
         "frame_len" : 11
+    },
+    "can_cfg" : {
+        "baudrate" : "PCAN_BAUD_250K",
+        "usb_bus" : "PCAN_USBBUS1",
+        "is_enable" : true
+    },
+    "db_mater_cfg" : {
+        "offset_idx_mux" : 4
     }
     
 
