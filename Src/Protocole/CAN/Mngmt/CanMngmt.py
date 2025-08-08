@@ -27,9 +27,10 @@ from datetime import datetime
 from typing import List, Optional
 from ..Drivers.Peak.Src.PCANBasic import *
 from Library.ModuleLog import MngLogFile, log
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
-
+from threading import Thread,Event
+from queue import Queue, Empty
 import ctypes
 from ctypes import Structure
 from ctypes import (c_char, 
@@ -54,7 +55,7 @@ import time
 # CAUTION : Automatic generated code section: End #
 DEBUG_MODE = False
 
-SIL_ECU_DLL_PATH = r'Src\Protocole\CAN\Drivers\SIL\Virtual_CanBus.dll'
+SIL_ECU_DLL_PATH = r'Src\Protocole\CAN\Drivers\SIL\VirtualCanBus_NetWrapper.dll'
 
 
 #-------------------------------------------------------------------
@@ -81,14 +82,14 @@ class MsgType(IntEnum):
     CAN_MNGMT_MSG_ERRFRAME = 6
     CAN_MNGMT_MSG_STATUS = 7
 
-class StructCANMsg (Structure):
-    """
-    Represents a PCAN message
-    """
-    id:int 
-    msgType:MsgType
-    len:int
-    data:List[int] = []
+@dataclass
+class StructCANMsg:
+    id: int = 0
+    msgType: MsgType = MsgType.CAN_MNGMT_MSG_STANDARD
+    length: int = 0
+    data: List[int] = field(default_factory=list)
+    timestamp:int = 0
+
 
 
 #------------------------
@@ -109,7 +110,6 @@ class CanModuleNotInitError(Exception):
 #------------------------
 class DriverCanUsed(IntEnum):
     DrvPeak = 0
-    DrvLibrary32bit = 1
 
 #------------------------
 # CanMngmtOptionError
@@ -124,10 +124,10 @@ class PeakCanConfig:
 #------------------------
 @dataclass
 class VirtCanConfig:
-    node: int
+    node: int # 4 virtual can bus from 0-3
 
 #------------------------
-# CanMngmtOptionError
+# CANInterface
 #------------------------
 class CANInterface(ABC):
     
@@ -138,30 +138,91 @@ class CANInterface(ABC):
         self.enable_log = kwargs.get('canlogging', False)
         self.error_cb_mngmt = kwargs.get('error_cb', self.default_error_handler)
         self.is_init = False
-
+        self._receive_queue: Queue = Queue()
+        self._rx_thread: Optional[Thread] = None
+        self._stop_rx_thread = Event()
         dir_log_path = kwargs.get('dir_log_path', '')
         if self.enable_log == True:
             if not os.path.isdir(dir_log_path):
                 raise NotADirectoryError(f"{dir_log_path} is not a directory")
 
             self.make_log = MngLogFile(dir_log_path, "CanLogging.log",\
-                                                log.DEBUG, "Can logging from M500_tester")            
+                                                log.DEBUG, "Can logging from M500_tester")  
+    #------------------------
+    # @connect
+    #------------------------          
     @abstractmethod
     def connect(self, **kwargs):
         pass
-
+    
+    #------------------------
+    # @disconnect
+    #------------------------     
     @abstractmethod
     def disconnect(self):
         pass
     
+    #------------------------
+    # @send
+    #------------------------     
     @abstractmethod
     def send(self, f_frame:StructCANMsg):
         pass
 
+    #------------------------
+    # @receive_poll
+    #------------------------     
     @abstractmethod
-    def receive(self) ->StructCANMsg:
+    def receive_poll(self) ->StructCANMsg:
+        pass
+    
+    #------------------------
+    # receive_queue_start
+    #------------------------     
+    def receive_queue_start(self)->None:
+        """
+            @brief Get TPCANMsgType from absqtraction
+        """ 
+        if not self.is_init:
+            raise CanModuleNotInitError('Instance Not Init, please use Connect Method first')
+
+        self._stop_rx_thread.clear()
+        self._rx_thread = Thread(target= self._can_reader_cyclic, daemon=True)
+        self._rx_thread.start()
+
+    #------------------------
+    # receive_queue_stop
+    #------------------------     
+    def receive_queue_stop(self) ->None:
+        return self._stop_rx_thread.set()
+    
+    #------------------------
+    # get_can_frame
+    #------------------------     
+    def get_can_frame(self, f_timeout:float=0.0)->StructCANMsg:
+        try:
+            msg, timestamp = self._receive_queue.get(timeout=f_timeout)
+            return StructCANMsg(msg.ID, MsgType.CAN_MNGMT_MSG_STANDARD, msg.LEN, msg.DATA, timestamp)
+        except (Empty):
+            return StructCANMsg()
+    
+    #------------------------
+    # @_can_reader_cyclic
+    #------------------------     
+    @abstractmethod
+    def _can_reader_cyclic(self):
+        pass
+        
+    #------------------------
+    # @flush
+    #------------------------     
+    @abstractmethod
+    def flush(self)->None:
         pass
 
+    #------------------------
+    # default_error_handler
+    #------------------------     
     def default_error_handler(self, status):
         print(f'[ERROR] : Can Error code -> {c_int32(status).value}')
     
@@ -218,9 +279,7 @@ def get_can_interface(  f_can_drv_used:DriverCanUsed,
 
     match f_can_drv_used:
         case DriverCanUsed.DrvPeak:
-            return PeakCanMngmt(kwargs=arg_kwargs)
-        case DriverCanUsed.DrvLibrary32bit:
-            return VirtCanMngmt(kwargs=arg_kwargs)       
+            return PeakCanMngmt(kwargs=arg_kwargs)    
 
 
 
@@ -237,7 +296,7 @@ class PeakCanMngmt(CANInterface):
         
 
     #------------------------
-    # connect
+    # @connect
     #------------------------
     def connect(self, **kwargs)-> None:
         """
@@ -257,7 +316,7 @@ class PeakCanMngmt(CANInterface):
             self.is_init = True
 
     #------------------------
-    # disconnect
+    # @disconnect
     #------------------------
     def disconnect(self) -> None:
         if self.handle is None:
@@ -268,7 +327,7 @@ class PeakCanMngmt(CANInterface):
         
         self.handle.Uninitialize(self.usb_bus)
     #------------------------
-    # send
+    # @send
     #------------------------
     def send(self, f_frame:StructCANMsg):
         """
@@ -279,9 +338,9 @@ class PeakCanMngmt(CANInterface):
             
         peak_can_struct = TPCANMsg()
         peak_can_struct.ID = f_frame.id
-        peak_can_struct.LEN = f_frame.len
+        peak_can_struct.LEN = f_frame.length
         peak_can_struct.MSGTYPE = self._get_peak_msg_type(f_frame.msgType)
-        peak_can_struct.DATA = [f_frame.data[idx_data] for idx_data in range(0, f_frame.len)]
+        peak_can_struct.DATA = [f_frame.data[idx_data] for idx_data in range(0, f_frame.length)]
 
         status = self.handle.Write(self.usb_bus, peak_can_struct)
 
@@ -297,9 +356,9 @@ class PeakCanMngmt(CANInterface):
             self.error_cb_mngmt(status)
 
     #------------------------
-    # receive
+    # @receive_poll
     #------------------------
-    def receive(self) ->StructCANMsg:
+    def receive_poll(self) ->StructCANMsg:
         """
             @brief Get TPCANMsgType from absqtraction
         """ 
@@ -311,7 +370,7 @@ class PeakCanMngmt(CANInterface):
         if not self.is_init:
             raise CanModuleNotInitError('Instance Not Init, please use Connect Method first')
 
-        can_status, peak_can_struct, __ = self.handle.Read(self.usb_bus)
+        can_status, peak_can_struct, timestamp = self.handle.Read(self.usb_bus)
 
         if can_status == PCAN_ERROR_OK:
             for index in range(0,self._MC_DLC_8):
@@ -327,15 +386,49 @@ class PeakCanMngmt(CANInterface):
                                                         peak_can_struct.DATA[5], peak_can_struct.DATA[6], 
                                                         peak_can_struct.DATA[7] ))
             #---- copy data ----#
-            can_struct.ID = peak_can_struct.ID
-
-            can_struct.id = peak_can_struct.ID
-            can_struct.len = peak_can_struct.LEN
-            can_struct.msgType = peak_can_struct.MSGTYPE
-            can_struct.data = [int(peak_can_struct.DATA[idx_data]) for idx_data in range(0, can_struct.len)]
+            can_struct = StructCANMsg(peak_can_struct.ID, MsgType.CAN_MNGMT_MSG_STANDARD, peak_can_struct.LEN, peak_can_struct.DATA, int(timestamp.millis))
         
-        return can_struct
+        elif can_status == PCAN_ERROR_QRCVEMPTY:
+            pass # OK 
 
+        else:
+                print(f"[ERROR] : an error occured in thread reading -> pcan status {self.handle.GetErrorText(can_status)}")
+        return can_struct
+    
+
+
+
+
+    #------------------------
+    # @flush
+    #------------------------
+    def flush(self) -> None:
+        """
+            @brief Get TPCANMsgType from absqtraction
+        """ 
+        if not self.is_init:
+            raise CanModuleNotInitError('Instance Not Init, please use Connect Method first')
+
+        self.handle.Reset(self.usb_bus)
+    
+    #------------------------
+    # _can_reader_cyclic
+    #------------------------
+    def _can_reader_cyclic(self)->None:
+        """
+            @brief Get TPCANMsgType from absqtraction
+        """ 
+        while not self._stop_rx_thread.is_set():
+            result, msg, timestamp = self.handle.Read(self.usb_bus)
+
+            if result == PCAN_ERROR_OK:
+                self._receive_queue.put((msg, timestamp))
+
+            elif result == PCAN_ERROR_QRCVEMPTY:
+                time.sleep(0.001) 
+
+            else:                
+                print(f"[ERROR] : an error occured in thread reading -> pcan status {self.handle.GetErrorText(result)}")
     #-------------------------
     # _get_peak_msg_type
     #-------------------------
@@ -394,193 +487,6 @@ class PeakCanMngmt(CANInterface):
         else:
             return MsgType.CAN_MNGMT_MSG_STANDARD
 
-
-#------------------------
-# PeakCanMngmt
-#------------------------
-class VirtCanMngmt(CANInterface):
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.handle = ctypes.windll.LoadLibrary(SIL_ECU_DLL_PATH)
-        self.client_id = 0
-
-    #------------------------
-    # connect
-    #------------------------
-    def connect(self, **kwargs)->None:
-        """
-            @brief Get TPCANMsgType from absqtraction
-        """
-
-        config = validate_config(VirtCanConfig, kwargs)
-
-        self.handle.KVCB_ClientInit.argtypes = [
-            POINTER(c_uint8),  # clientHandle_pu8
-            c_char_p,          # clientName_pc
-            c_uint8            # canNode_u8
-        ]
-
-        self.handle.KVCB_ClientInit.restype = c_uint
-        client_name = (c_char * 40)(*f'PyCan{config.node}'.encode('utf-8')) # 40 is max for the dll
-        appli_handle = c_uint8()
-
-        #---- try connection ----#
-        retcode = self.handle.KVCB_ClientInit(byref(appli_handle), client_name, config.node)
-
-        if retcode != 0:
-            raise ConnectionRefusedError(f"Can init failed -> StatusError : {retcode}, Check PCANBasic.py for reference")
-
-        else:
-            self.client_id = appli_handle.value
-            self.is_init = True
-
-    #------------------------
-    # disconnect
-    #------------------------
-    def disconnect(self) -> None:
-        if self.handle is None:
-            RuntimeError('Class not initized')
-
-        if not self.is_init:
-            raise CanModuleNotInitError('Instance Not Init, please use Connect Method first')
-
-        self.handle.KVCB_CloseClient
-
-    #------------------------
-    # send
-    #------------------------
-    def send(self, f_frame:StructCANMsg):
-        """
-            @brief Get TPCANMsgType from absqtraction
-        """
-
-        if not self.is_init:
-            raise CanModuleNotInitError('Instance Not Init, please use Connect Method first')
-
-        self.handle.KVCB_ClientSend.argtypes = [c_uint32,           # msg_id
-                                                POINTER(c_uint8),   # data
-                                                c_uint8,            # data_len
-                                                c_uint8]            # frame_type
-        self.handle.KVCB_ClientSend.restype = c_uint
-
-        data_array = (c_uint8 * f_frame.len)(*f_frame.data)
-        dll_frame_type = self.__get_dll_fram_type(f_frame_type=f_frame.msgType)
-
-        retcode = self.handle.KVCB_ClientSend(  c_uint8(self.client_id), 
-                                                c_uint32(f_frame.id),
-                                                data_array,
-                                                c_uint8(f_frame.len),
-                                                c_uint8(dll_frame_type.value))
-        
-        if(retcode != 0):
-            if self.enable_log:
-                self.make_log.LCF_SetMsgLog(    log.ERROR, f"[_send_can] -> error occured while sending msg, statusCAN -> {retcode}, msg ->" \
-                                                "0x%03X %02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X" \
-                                                    % (f_frame.id , f_frame.data[0], 
-                                                        f_frame.data[1], f_frame.data[2], 
-                                                        f_frame.data[3], f_frame.data[4], 
-                                                        f_frame.data[5], f_frame.data[6], 
-                                                        f_frame.data[7] ))
-            self.error_cb_mngmt(retcode)
-
-    #------------------------
-    # receive
-    #------------------------
-    
-    def receive(self) -> StructCANMsg:
-        """
-        @brief Receive a CAN message from the virtual CAN bus
-        @return StructCANMsg
-        """
-
-        if not self.is_init:
-            raise CanModuleNotInitError('Instance Not Init, please use Connect Method first')
-
-        # Définition des types de la fonction
-        self.handle.KVCB_ClientReceive.argtypes = [
-            c_uint8,                    # clientHandle_u8
-            POINTER(c_uint32),         # canId_pu32
-            POINTER(c_uint8),          # data_au8[]
-            POINTER(c_uint8),          # dataLength_pu8
-            POINTER(c_uint8)           # frameType_pe (si enum = uint8)
-        ]
-        self.handle.KVCB_ClientReceive.restype = c_uint  # t_eReturnCode
-
-        # Préparation des buffers
-        can_id = c_uint32()
-        data_buffer = (c_uint8 * 8)()  # CAN classique = 8 octets max
-        data_len = c_uint8()
-        frame_type = c_uint8()
-
-        # Appel de la fonction
-        retcode = self.handle.KVCB_ClientReceive(   c_uint8(self.client_id),
-                                                    byref(can_id),
-                                                    data_buffer,
-                                                    byref(data_len),
-                                                    byref(frame_type)
-        )
-
-        if c_int32(retcode).value != 0 and  c_int32(retcode).value != c_int32(t_eReturnCode.RC_ERROR_NOT_AVAILABLE.value).value:
-            if self.enable_log:
-                self.make_log.LCF_SetMsgLog(log.ERROR, f"[receive_can] -> error occurred while receiving msg, statusCAN -> {retcode}")
-            self.error_cb_mngmt(retcode)
-            return StructCANMsg()
-
-        # Construction du message StructCANMsg
-        received_data = [data_buffer[i] for i in range(data_len.value)]
-
-        return StructCANMsg(
-            id=can_id.value,
-            msgType=self.__get_msg_type_from_dll(frame_type.value),
-            len=data_len.value,
-            data=received_data
-        )
-
-
-    #------------------------
-    # __get_dll_fram_type
-    #------------------------
-    def __get_dll_fram_type(self, f_frame_type:MsgType) -> c_uint8:
-        """
-            @brief Get TPCANMsgType from absqtraction
-        """
-        match f_frame_type.value:
-            case MsgType.CAN_MNGMT_MSG_STANDARD.value:
-                return c_uint8(0)
-            case MsgType.CAN_MNGMT_MSG_RTR.value:
-                return c_uint8(2)
-            case MsgType.CAN_MNGMT_MSG_EXTENDED.value:
-                return c_uint8(1)
-            case MsgType.CAN_MNGMT_MSG_FD.value:
-                return c_uint8(4)
-            case MsgType.CAN_MNGMT_MSG_BRS.value |\
-            MsgType.CAN_MNGMT_MSG_ESI.value|\
-            MsgType.CAN_MNGMT_MSG_ECHO.value |\
-            MsgType.CAN_MNGMT_MSG_ERRFRAME.value|\
-            MsgType.CAN_MNGMT_MSG_STATUS.value|\
-            _: 
-                raise ValueError(f'{f_frame_type} not supported in dll')
-
-    #------------------------
-    # __get_msg_type_from_dll
-    #------------------------    
-    def __get_msg_type_from_dll(self, f_dll_frame_type:int)->MsgType:
-        """
-            @brief Get TPCANMsgType from absqtraction
-        """
-        match f_dll_frame_type:
-            case 0:
-                return MsgType.CAN_MNGMT_MSG_STANDARD
-            case 1:
-                return MsgType.CAN_MNGMT_MSG_EXTENDED
-            case 3:
-                return MsgType.CAN_MNGMT_MSG_RTR
-            case 4:
-                return MsgType.CAN_MNGMT_MSG_FD
-            case _:
-                print(f'Receive an unexpected frame type {f_dll_frame_type}...!!!')
-                return MsgType.CAN_MNGMT_MSG_STANDARD
-                
 #-------------------------------------------------------------------
 #                          End of file
 #-------------------------------------------------------------------

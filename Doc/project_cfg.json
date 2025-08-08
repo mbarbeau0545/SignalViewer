@@ -8,7 +8,7 @@
     },
     "can_cfg" : {
         "baudrate" : "PCAN_BAUD_250K",
-        "usb_bus" : "PCAN_USBBUS1",
+        "usb_bus" : "PCAN_USBBUS2",
         "is_enable" : true
     },
     "db_mater_cfg" : {

@@ -19,7 +19,7 @@ from queue import Queue, Empty
 
 
 import importlib
-from Protocole.CAN.Mngmt.CanMngmt import get_can_interface, DriverCanUsed, StructCANMsg
+from Protocole.CAN.Mngmt.CanMngmt import get_can_interface, DriverCanUsed, StructCANMsg,MsgType
 from Protocole.SERIAL.SerialMngmt import SerialMngmt, SerialError
 #------------------------------------------------------------------------------
 #                                       CONSTANT
@@ -74,8 +74,8 @@ class FrameMngmt():
             self.sigcfg_file = prj_cfg_data["signal_cfg"]
             srl_baudrate:int = prj_cfg_data["serial_cfg"]["baudrate"]
             srl_protcom:str = prj_cfg_data["serial_cfg"]["port_com"]
-            can_baudrate:int = getattr(pcan_module, prj_cfg_data["can_cfg"]["baudrate"])
-            can_protcom:int  = getattr(pcan_module, prj_cfg_data["can_cfg"]["usb_bus"])
+            self.can_baudrate:int = getattr(pcan_module, prj_cfg_data["can_cfg"]["baudrate"])
+            self.can_protcom:int  = getattr(pcan_module, prj_cfg_data["can_cfg"]["usb_bus"])
 
             self._is_serial_enable:bool = prj_cfg_data["serial_cfg"]["is_enable"]
             self._srl_frame_len:int = prj_cfg_data["serial_cfg"]["frame_len"]
@@ -89,7 +89,7 @@ class FrameMngmt():
         self._idx_mux_offset = prj_cfg_data["db_mater_cfg"].get("offset_idx_mux", 0)
         # serial managment #
         self._serial_istc = SerialMngmt(srl_baudrate, srl_protcom, self.__error_serial_cb)
-        self._can_istc = get_can_interface(DriverCanUsed.DrvLibrary32bit, f_error_cb= self.__error_can_cb)
+        self._can_istc = get_can_interface(DriverCanUsed.DrvPeak, f_error_cb= self.__error_can_cb)
         # signals maangment
         self.enum:Dict[str, List[List[int]]] = {}
         self.signals:Dict[str, Dict] = {}
@@ -163,7 +163,9 @@ class FrameMngmt():
             self._srl_frame_thread.start()
 
         if self._is_can_enable:
-            self._can_istc.connect(node = 2)
+            self._can_istc.connect(pcan_usb = self.can_protcom, pcan_baudrate= self.can_baudrate) 
+            self._can_istc.flush()
+            self._can_istc.receive_queue_start()
             self._stop_can_thread.clear()
             self._can_frame_thread = threading.Thread(target=self._cyclic_can_frame, daemon=True)
             self._can_frame_thread.start()
@@ -196,7 +198,8 @@ class FrameMngmt():
             srl_frame = self._serial_istc.get_frame()
             if srl_frame is not None:
                 self.__decode_srl_frame(srl_frame)
-            time.sleep(0.01)
+            else:
+                time.sleep(0.01)
 
     
     #--------------------------
@@ -211,11 +214,20 @@ class FrameMngmt():
 
         Raises:
         """
+        cnt_frame = 0
+        current_time = 0
         while not self._stop_can_thread.is_set():
-            can_frame = self._can_istc.receive()
-            if can_frame.data != []:
+            can_frame = self._can_istc.get_can_frame()
+            if can_frame.data != [] and can_frame.id != 418381708:
+                cnt_frame += 1
+                if(time.time() - current_time > 1):
+                    print(f'Manage {cnt_frame}')
+                    current_time = time.time()
+                    cnt_frame = 0
+
                 self.__decode_can_frame(can_frame)
-            time.sleep(0.01)
+            else:
+                time.sleep(0.01)
                 
 
     #--------------------------
@@ -286,7 +298,6 @@ class FrameMngmt():
             f_srl_frame (bytes); the frame to decode
         Raises:
         """
-        current_time = time.time_ns()
         msg_id = f_can_frame.id  
 
         # Recherche du symbole correspondant à msg_id
@@ -297,7 +308,7 @@ class FrameMngmt():
                 break
 
         if symbol is None:
-            print(f"[ERROR] : Symbole inconnu pour msg_id {msg_id}")
+            pass#print(f"[ERROR] : Symbole inconnu pour msg_id {msg_id}")
             return
 
         
@@ -348,7 +359,8 @@ class FrameMngmt():
             # Stocker la valeur dans la queue associée
             if signal_name not in self.sig_value:
                 self.sig_value[signal_name] = Queue()
-            self.sig_value[signal_name].put([raw_value, value, current_time])
+
+            self.sig_value[signal_name].put([raw_value, value, f_can_frame.timestamp])
 
 
     #--------------------------
