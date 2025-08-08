@@ -19,7 +19,7 @@ from queue import Queue, Empty
 
 
 import importlib
-from Protocole.CAN.Mngmt.CanMngmt import CanMngmt, DriverCanUsed, StructCANMsg
+from Protocole.CAN.Mngmt.CanMngmt import get_can_interface, DriverCanUsed, StructCANMsg
 from Protocole.SERIAL.SerialMngmt import SerialMngmt, SerialError
 #------------------------------------------------------------------------------
 #                                       CONSTANT
@@ -89,8 +89,7 @@ class FrameMngmt():
         self._idx_mux_offset = prj_cfg_data["db_mater_cfg"].get("offset_idx_mux", 0)
         # serial managment #
         self._serial_istc = SerialMngmt(srl_baudrate, srl_protcom, self.__error_serial_cb)
-        self._can_istc = CanMngmt(DriverCanUsed.DrvLibrary32bit, can_baudrate, can_protcom, False, f_error_cb=self.__error_can_cb )
-
+        self._can_istc = get_can_interface(DriverCanUsed.DrvLibrary32bit, f_error_cb= self.__error_can_cb)
         # signals maangment
         self.enum:Dict[str, List[List[int]]] = {}
         self.signals:Dict[str, Dict] = {}
@@ -164,7 +163,7 @@ class FrameMngmt():
             self._srl_frame_thread.start()
 
         if self._is_can_enable:
-            self._can_istc.initiliaze_drv()
+            self._can_istc.connect(node = 2)
             self._stop_can_thread.clear()
             self._can_frame_thread = threading.Thread(target=self._cyclic_can_frame, daemon=True)
             self._can_frame_thread.start()
@@ -180,7 +179,7 @@ class FrameMngmt():
         self._serial_istc.stop()
         self._stop_srl_thread.set()
 
-        self._can_istc.uninitialize_drv()
+        self._can_istc.disconnect()
     #--------------------------
     # _cyclic_serial_frame
     #--------------------------
@@ -213,7 +212,7 @@ class FrameMngmt():
         Raises:
         """
         while not self._stop_can_thread.is_set():
-            can_frame = self._can_istc.read_can()
+            can_frame = self._can_istc.receive()
             if can_frame.data != []:
                 self.__decode_can_frame(can_frame)
             time.sleep(0.01)
