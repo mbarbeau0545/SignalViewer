@@ -117,7 +117,7 @@ class CANInterface(ABC):
                 raise NotADirectoryError(f"{dir_log_path} is not a directory")
 
             self.make_log = MngLogFile(dir_log_path, "CanLogging.log",\
-                                                log.DEBUG, "Can logging from M500_tester")  
+                                                log.DEBUG, "Can logging")  
     #------------------------
     # @connect
     #------------------------          
@@ -169,10 +169,10 @@ class CANInterface(ABC):
     #------------------------
     # get_can_frame
     #------------------------     
-    def get_can_frame(self, f_timeout:float=0.0)->StructCANMsg:
+    def get_can_frame(self, f_timeout:float=0.05)->StructCANMsg:
         try:
             msg, timestamp = self._receive_queue.get(timeout=f_timeout)
-            return StructCANMsg(msg.ID, MsgType.CAN_MNGMT_MSG_STANDARD, msg.LEN, msg.DATA, timestamp)
+            return StructCANMsg(msg.ID, MsgType.CAN_MNGMT_MSG_STANDARD, msg.LEN, msg.DATA, int(timestamp.millis))
         except (Empty):
             return StructCANMsg()
                 

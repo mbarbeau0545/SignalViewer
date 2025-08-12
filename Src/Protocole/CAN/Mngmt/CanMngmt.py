@@ -68,16 +68,19 @@ def get_can_interface(  f_can_drv_used:DriverCanUsed,
         @details 
 
     """ 
+
+    # mapping for abstract library
     arg_kwargs = {
         'canlogging' : f_canlogging, 
         'dir_log_path' : f_dirlog_path, 
         'error_cb' : f_error_cb    }
 
+    # **arg_kwargs means unpack (pas to a dictionnary to var_a = 1, var_b = 2 etc)
     match f_can_drv_used:
         case DriverCanUsed.DrvPeak:
-            return PeakCanMngmt(kwargs=arg_kwargs)
+            return PeakCanMngmt(**arg_kwargs)
         case DriverCanUsed.DrvLibrary32bit:
-            return VirtCanMngmt(kwargs=arg_kwargs)       
+            return VirtCanMngmt(**arg_kwargs)       
 
 
 

@@ -22,6 +22,7 @@ import importlib
 from Protocole.CAN.Mngmt.CanMngmt import get_can_interface, DriverCanUsed
 from Protocole.CAN.Mngmt.AbstractCAN import StructCANMsg, CanMngmtError
 from Protocole.SERIAL.SerialMngmt import SerialMngmt, SerialError
+from Library.ModuleLog import MngLogFile, log
 #------------------------------------------------------------------------------
 #                                       CONSTANT
 #------------------------------------------------------------------------------
@@ -62,44 +63,78 @@ class IdxSignal:
 
 class FrameMngmt():
     def __init__(self, f_prjcfg_file:str):
-        
+        self.prj_cfg_data = {}
+        candriver:DriverCanUsed = DriverCanUsed.DrvPeak
+
         if not os.path.isfile(f_prjcfg_file):
             raise FileNotFoundError(f'Signal Config file doest not exits {f_prjcfg_file}')
         
         with open(f_prjcfg_file, "r") as file:
-            prj_cfg_data = json.load(file)
-
-        pcan_module = importlib.import_module("Protocole.CAN.Drivers.Peak.Src.PCANBasic")
+            self.prj_cfg_data = json.load(file)
 
         try:
-            self.sigcfg_file = prj_cfg_data["signal_cfg"]
-            srl_baudrate:int = prj_cfg_data["serial_cfg"]["baudrate"]
-            srl_protcom:str = prj_cfg_data["serial_cfg"]["port_com"]
-            self.can_baudrate:int = getattr(pcan_module, prj_cfg_data["can_cfg"]["baudrate"])
-            self.can_protcom:int  = getattr(pcan_module, prj_cfg_data["can_cfg"]["usb_bus"])
+            self.sigcfg_file = self.prj_cfg_data["signal_cfg"]
+            srl_baudrate:int = self.prj_cfg_data["serial_cfg"]["baudrate"]
+            srl_protcom:str = self.prj_cfg_data["serial_cfg"]["port_com"]
+            self._srl_frame_len = self.prj_cfg_data["serial_cfg"]["frame_len"]
 
-            self._is_serial_enable:bool = prj_cfg_data["serial_cfg"]["is_enable"]
-            self._srl_frame_len:int = prj_cfg_data["serial_cfg"]["frame_len"]
+            self._is_serial_enable:bool = self.prj_cfg_data["serial_cfg"]["is_enable"]
+            self._is_can_enable:bool = self.prj_cfg_data["can_cfg"]["is_enable"]
 
-            self._is_can_enable:bool = prj_cfg_data["can_cfg"]["is_enable"]
+            self._enable_can_log:bool = self.prj_cfg_data["can_cfg"]["enable_can_msg_logg"]
+            self._enable_cansig_log:bool = self.prj_cfg_data["serial_cfg"]["enable_sig_logg"]
+            self._enable_srl_log:bool = self.prj_cfg_data["serial_cfg"]["enable_srl_msg_logg"]
+            self._enable_srlsig_log:bool = self.prj_cfg_data["serial_cfg"]["enable_sig_logg"]
+
+            self._can_id_ignore:List[int] =  self.prj_cfg_data["can_cfg"]["id_to_ignore"]
+
+            if self._is_can_enable:
+                gate:str = self.prj_cfg_data["can_cfg"]["gate"]
+                if gate.upper() == "PEAK":
+                    candriver = DriverCanUsed.DrvPeak
+                elif gate.upper() == "VIRTUALECU":
+                    candriver = DriverCanUsed.DrvLibrary32bit
+                else:
+                    raise ValueError(f'{gate} gate for CAN not allowed PEAK or VirtalEcu allowed')
+            self._idx_mux_offset = self.prj_cfg_data["db_mater_cfg"].get("offset_idx_mux", 0)
 
         except (KeyError, TypeError, AttributeError) as e:
             raise Exception(f'An error occured while extracting config project -> {e}')
         
         # also get the offset master stuff ^^ 
-        self._idx_mux_offset = prj_cfg_data["db_mater_cfg"].get("offset_idx_mux", 0)
         # serial managment #
-        self._serial_istc = SerialMngmt(srl_baudrate, srl_protcom, self.__error_serial_cb)
-        self._can_istc = get_can_interface(DriverCanUsed.DrvPeak, f_error_cb= self.__error_can_cb)
+        self._serial_istc = SerialMngmt(srl_baudrate, 
+                                        srl_protcom, 
+                                        f_enable_log=self._enable_srl_log,
+                                        f_dirlog=self.prj_cfg_data["serial_cfg"]["srl_log_path"],
+                                        f_srl_err_cb=self.__error_serial_cb)
+        self._can_istc = get_can_interface( candriver,
+                                            f_canlogging=self._enable_can_log,
+                                            f_dirlog_path= self.prj_cfg_data["can_cfg"]["can_log_path"],
+                                            f_error_cb= self.__error_can_cb)
+        
+
         # signals maangment
         self.enum:Dict[str, List[List[int]]] = {}
         self.signals:Dict[str, Dict] = {}
         self.sig_value:Dict[str, Queue] = {}
         self.symbol:Dict[str, Dict] = {}
+        self.can_cnt_buff_log:int = 0
+        self.srl_cnt_buff_log:int = 0
         self.list_id = {
             'SRL' : [],
             'CAN' : []
         }
+        if self._is_can_enable and self._enable_cansig_log:
+            self.sigcan_log = MngLogFile( self.prj_cfg_data["can_cfg"]["sig_log_path"],
+                                        "CanSigLogging.log",\
+                                        log.DEBUG, "Signal logging")
+            
+        if self._is_serial_enable and self._enable_srlsig_log:
+            self.srlcan_log = MngLogFile( self.prj_cfg_data["serial_cfg"]["sig_log_path"],
+                                        "SerialSigLogging.log",\
+                                        log.DEBUG, "Signal logging")
+
 
         # thread maangment 
         self._srl_frame_thread: Optional[threading.Thread] = None
@@ -122,7 +157,7 @@ class FrameMngmt():
         Raises:
             KeyError: if the signals is not found.
         """
-        result = [[]]
+        result:List[int] = []
         sig_queue = self.sig_value.get(f_signal)
         if sig_queue is None:
             raise KeyError(f"{f_signal} does not exist in Signal Configuration")
@@ -164,7 +199,7 @@ class FrameMngmt():
             self._srl_frame_thread.start()
 
         if self._is_can_enable:
-            self._can_istc.connect(pcan_usb = self.can_protcom, pcan_baudrate= self.can_baudrate) 
+            self._can_istc.connect(pcan_usb = self.prj_cfg_data["can_cfg"]["usb_bus"], pcan_baudrate= self.prj_cfg_data["can_cfg"]["baudrate"]) 
             self._can_istc.flush()
             self._can_istc.receive_queue_start()
             self._stop_can_thread.clear()
@@ -197,10 +232,20 @@ class FrameMngmt():
 
         Raises:
         """
+        cnt_buff_log:int = 0
+        buffer_log:str = ''
+
         while not self._stop_srl_thread.is_set():
             srl_frame = self._serial_istc.get_frame()
             if srl_frame is not None:
-                self.__decode_srl_frame(srl_frame)
+                buffer_log += self.__decode_srl_frame(srl_frame)
+
+                if self._enable_srl_log:
+                    cnt_buff_log += 1
+                    if cnt_buff_log > 1000:
+                        self.srlcan_log.LCF_SetMsgLog(log.INFO, buffer_log)
+                        buffer_log = ''
+                        cnt_buff_log = 0
             else:
                 time.sleep(0.01)
 
@@ -217,35 +262,41 @@ class FrameMngmt():
 
         Raises:
         """
-        cnt_frame = 0
-        current_time = 0
+        cnt_buff_log:int = 0
+        buffer_log:str = ''
+
         while not self._stop_can_thread.is_set():
             can_frame = self._can_istc.get_can_frame()
-            if can_frame.data != [] and can_frame.id != 418381708:
-                cnt_frame += 1
-                if(time.time() - current_time > 1):
-                    print(f'Manage {cnt_frame}')
-                    current_time = time.time()
-                    cnt_frame = 0
 
-                self.__decode_can_frame(can_frame)
+            if can_frame.data != [] and can_frame.id not in self._can_id_ignore:
+                buffer_log += self.__decode_can_frame(can_frame)
+
+                if self._enable_cansig_log:
+                    cnt_buff_log += 1
+                    if cnt_buff_log > 1000:
+                        self.sigcan_log.LCF_SetMsgLog(log.INFO, buffer_log)
+                        buffer_log = ''
+                        cnt_buff_log = 0
+                
             else:
+                #print('got nothing')
                 time.sleep(0.01)
                 
 
     #--------------------------
     # __decode_srl_frame
     #--------------------------
-    def __decode_srl_frame(self, f_srl_frame:bytes)->None:
+    def __decode_srl_frame(self, f_srl_frame:bytes)->str:
         """Interpret a serial frame into signals value
         Args: 
             f_srl_frame (bytes); the frame to decode
         Raises:
         """
+        buffer_log = ''
         current_time = time.time_ns()
         if len(f_srl_frame) < self._srl_frame_len:
             print("[ERROR] : Trame trop courte")
-            return
+            return ''
 
         # 3e octet = id (en hex string pour correspondre à msg_id dans symbol)
         msg_id = f"{f_srl_frame[2]:03X}"  # ex: '010' ou '020'
@@ -259,7 +310,7 @@ class FrameMngmt():
 
         if symbol is None:
             print(f"[ERROR] : Symbole inconnu pour msg_id {msg_id}")
-            return
+            return ''
 
         signals:Dict = symbol['signals']  # dict signal_name -> bit position
 
@@ -291,17 +342,21 @@ class FrameMngmt():
             if signal_name not in self.sig_value:
                 self.sig_value[signal_name] = Queue()
             self.sig_value[signal_name].put([raw_value, value, current_time])
+            buffer_log += f'{current_time} {msg_id} {raw_value} {value}'
+
+        return buffer_log
 
     #--------------------------
     # __decode_can_frame
     #--------------------------
-    def __decode_can_frame(self, f_can_frame:StructCANMsg)->None:
+    def __decode_can_frame(self, f_can_frame:StructCANMsg)-> str:
         """Interpret a serial frame into signals value
         Args: 
             f_srl_frame (bytes); the frame to decode
         Raises:
         """
-        msg_id = f_can_frame.id  
+        msg_id = f_can_frame.id
+        bufffer_log = ''
 
         # Recherche du symbole correspondant à msg_id
         symbol = None
@@ -312,7 +367,7 @@ class FrameMngmt():
 
         if symbol is None:
             pass#print(f"[ERROR] : Symbole inconnu pour msg_id {msg_id}")
-            return
+            return bufffer_log
 
         
         raw_data = bytes([int(byte) for byte in list(f_can_frame.data)])
@@ -364,8 +419,9 @@ class FrameMngmt():
                 self.sig_value[signal_name] = Queue()
 
             self.sig_value[signal_name].put([raw_value, value, f_can_frame.timestamp])
+            bufffer_log += f'{f_can_frame.timestamp} {signal_name} {raw_value} {value}\n'
 
-
+        return bufffer_log
     #--------------------------
     # __extract_bits
     #--------------------------

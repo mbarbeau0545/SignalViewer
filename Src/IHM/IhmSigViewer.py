@@ -198,7 +198,7 @@ class SignalViewer(QMainWindow):
                     return
 
             for sig_info in sig_val:
-                if sig_info and sig_info[2] >= widget._t0:
+                if sig_info and int(sig_info[2]) >= widget._t0:
                     t_sec = (sig_info[2] - widget._t0) / 1e9
                     if not widget._times or t_sec > widget._times[-1]:
                         widget._times.append(t_sec)

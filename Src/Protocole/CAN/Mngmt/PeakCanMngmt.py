@@ -23,6 +23,7 @@
 #-------------------------------------------------------------------
 import os, time
 from enum import IntEnum
+import importlib
 from typing import List, Optional
 from Library.ModuleLog import MngLogFile, log
 from dataclasses import dataclass, field
@@ -57,8 +58,8 @@ SIL_ECU_DLL_PATH = r'Src\Protocole\CAN\Drivers\SIL\VirtualCanBus_NetWrapper.dll'
 #------------------------
 @dataclass
 class PeakCanConfig:
-    pcan_usb: TPCANHandle
-    pcan_baudrate: TPCANBaudrate
+    pcan_usb: str # from TPCANHandle
+    pcan_baudrate: str # from TPCANBaudrate
 
 #------------------------
 # PeakCanMngmt
@@ -82,12 +83,14 @@ class PeakCanMngmt(CANInterface):
 
         config = validate_config(PeakCanConfig, kwargs)
 
-        status_can_bus = self.handle.Initialize(config.pcan_usb, config.pcan_baudrate)
+        pcan_module = importlib.import_module("Protocole.CAN.Drivers.Peak.Src.PCANBasic")
+        self.usb_bus = getattr(pcan_module, config.pcan_usb)
+        
+        status_can_bus = self.handle.Initialize(self.usb_bus, getattr(pcan_module,config.pcan_baudrate))
 
         if(status_can_bus != PCAN_ERROR_OK):
-            raise ConnectionRefusedError(f"Can init failed -> StatusError : {status_can_bus}, Check PCANBasic.py for reference")
+            raise ConnectionRefusedError(f"Can init failed -> StatusError : {self.handle.GetErrorText(status_can_bus)}, Check PCANBasic.py for reference")
         else:
-            self.usb_bus = config.pcan_usb
             self.is_init = True
 
     #------------------------
@@ -121,7 +124,7 @@ class PeakCanMngmt(CANInterface):
 
         if(status != PCAN_ERROR_OK):
             if self.enable_log:
-                self.make_log.LCF_SetMsgLog(log.ERROR, f"[_send_can] -> error occured while sending msg, statusCAN -> {status}, msg ->" \
+                self.make_log.LCF_SetMsgLog(log.ERROR, f"[_send_can] -> error occured while sending msg, statusCAN -> {self.handle.GetErrorText(status_can_bus)}, msg ->" \
                                         "0x%03X %02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X" \
                                             % (f_frame.id , f_frame.data[0], 
                                                 f_frame.data[1], f_frame.data[2], 
@@ -194,6 +197,9 @@ class PeakCanMngmt(CANInterface):
             @brief Get TPCANMsgType from absqtraction
         """ 
         last_time_rec = time.time()
+        cnt_buff_log:int = 0
+        buffer_log:str = ''
+
         while not self._stop_rx_thread.is_set():
             current_time = time.time()
             result, msg, timestamp = self.handle.Read(self.usb_bus)
@@ -201,6 +207,19 @@ class PeakCanMngmt(CANInterface):
             if result == PCAN_ERROR_OK:
                 last_time_rec = current_time
                 self._receive_queue.put((msg, timestamp))
+
+                if self.enable_log:
+                    cnt_buff_log += 1
+                    buffer_log += "[%02X] : 0x%03X %02X,%02X,%02X,%02X,%02X,%02X,%02X,%02X\n" \
+                                                    % (timestamp.millis, msg.ID     , msg.DATA[0],             
+                                                        msg.DATA[1], msg.DATA[2], 
+                                                        msg.DATA[3], msg.DATA[4], 
+                                                        msg.DATA[5], msg.DATA[6], 
+                                                        msg.DATA[7])
+                    if cnt_buff_log > 3000:
+                        self.make_log.LCF_SetMsgLog(log.INFO, buffer_log)
+                        buffer_log = ''
+                        cnt_buff_log = 0
 
             elif result == PCAN_ERROR_QRCVEMPTY:
                 if (current_time - last_time_rec) > 5: # seconds 
