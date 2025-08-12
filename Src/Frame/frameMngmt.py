@@ -19,7 +19,8 @@ from queue import Queue, Empty
 
 
 import importlib
-from Protocole.CAN.Mngmt.CanMngmt import get_can_interface, DriverCanUsed, StructCANMsg,MsgType
+from Protocole.CAN.Mngmt.CanMngmt import get_can_interface, DriverCanUsed
+from Protocole.CAN.Mngmt.AbstractCAN import StructCANMsg, CanMngmtError
 from Protocole.SERIAL.SerialMngmt import SerialMngmt, SerialError
 #------------------------------------------------------------------------------
 #                                       CONSTANT
@@ -178,9 +179,11 @@ class FrameMngmt():
     def unperform_cyclic(self)->None:
         """Unperform cyclic frame analyzer
         """
+
         self._serial_istc.stop()
         self._stop_srl_thread.set()
 
+        self._can_istc.receive_queue_stop()
         self._can_istc.disconnect()
     #--------------------------
     # _cyclic_serial_frame
@@ -303,7 +306,7 @@ class FrameMngmt():
         # Recherche du symbole correspondant à msg_id
         symbol = None
         for sym_name, sym in self.symbol.items():
-            if sym['msg_id'] == msg_id:
+            if int(sym['msg_id']& 0x0000FFFF) == int(msg_id & 0x0000FFFF):
                 symbol = sym
                 break
 
@@ -421,10 +424,10 @@ class FrameMngmt():
      #--------------------------
     # __interpret_frame
     #--------------------------
-    def __error_can_cb(self, f_type_error:SerialError):
+    def __error_can_cb(self, f_type_error:CanMngmtError):
         """Management of serial line whenever an error occured
         """
-        if f_type_error == SerialError.SerialErrorLost:
+        if f_type_error == CanMngmtError.ErrorLost:
             self._stop_can_thread.set()
             print("[ERROR] : Stopping serial thread in FrameMngmt")
         else:
