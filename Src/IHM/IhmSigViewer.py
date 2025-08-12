@@ -202,14 +202,15 @@ class SignalViewer(QMainWindow):
                     t_sec = (sig_info[2] - widget._t0) / 1e9
                     if not widget._times or t_sec > widget._times[-1]:
                         widget._times.append(t_sec)
-                        widget._values.append(sig_info[1])
+                        widget._values.append(sig_info[0])
 
             # Limiter les points affichés
             if len(widget._times) > PLOT_MAX_POINT:
                 widget._times = widget._times[-PLOT_MAX_POINT:]
                 widget._values = widget._values[-PLOT_MAX_POINT:]
 
-            widget._curve.setData(widget._times, widget._values)
+            if len(widget._times) != 1:
+                widget._curve.setData(widget._times, widget._values)
 
         # Timer Qt
         timer = QTimer(widget)

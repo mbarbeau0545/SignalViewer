@@ -78,7 +78,7 @@ def get_can_interface(  f_can_drv_used:DriverCanUsed,
     # **arg_kwargs means unpack (pas to a dictionnary to var_a = 1, var_b = 2 etc)
     match f_can_drv_used:
         case DriverCanUsed.DrvPeak:
-            return PeakCanMngmt(**arg_kwargs)
+            return None
         case DriverCanUsed.DrvLibrary32bit:
             return VirtCanMngmt(**arg_kwargs)       
 

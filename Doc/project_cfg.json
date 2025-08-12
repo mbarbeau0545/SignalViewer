@@ -1,18 +1,24 @@
 {
-    "signal_cfg" : "C:\\PROJECT\\0_SOFWTARE\\3_Pyhton\\SignalViewer\\Doc\\Runnable_AppBtInterface_CSL.dbc",
+    "signal_cfg" : "Doc\\PrjMsgDefinition.sym",
     "serial_cfg" : {
         "port_com" : "COM3",
         "baudrate" : "115200",
-        "is_enable" : false,
-        "frame_len" : 11
+        "is_enable" : true,
+        "frame_len" : 11,
+        "enable_srl_msg_logg" : false,
+        "enable_sig_logg" : false,
+        "srl_log_path" : "Doc/Log"
     },
     "can_cfg" : {
         "baudrate" : "PCAN_BAUD_250K",
         "usb_bus" : "PCAN_USBBUS2",
-        "is_enable" : true
-    },
-    "db_mater_cfg" : {
-        "offset_idx_mux" : 4
+        "is_enable" : false,
+        "enable_can_msg_logg" : false,
+        "enable_sig_logg" : false,
+        "id_to_ignore" : [],
+        "gate" : "Peak",
+        "can_log_path" : "Doc/Log"
+
     }
     
 

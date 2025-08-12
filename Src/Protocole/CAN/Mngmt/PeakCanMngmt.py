@@ -42,7 +42,6 @@ from .AbstractCAN import (CANInterface, MsgType,
 # CAUTION : Automatic generated code section: End #
 DEBUG_MODE = False
 
-SIL_ECU_DLL_PATH = r'Src\Protocole\CAN\Drivers\SIL\VirtualCanBus_NetWrapper.dll'
 
 
 #-------------------------------------------------------------------

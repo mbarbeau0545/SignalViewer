@@ -92,11 +92,8 @@ class FrameMngmt():
                 gate:str = self.prj_cfg_data["can_cfg"]["gate"]
                 if gate.upper() == "PEAK":
                     candriver = DriverCanUsed.DrvPeak
-                elif gate.upper() == "VIRTUALECU":
-                    candriver = DriverCanUsed.DrvLibrary32bit
                 else:
-                    raise ValueError(f'{gate} gate for CAN not allowed PEAK or VirtalEcu allowed')
-            self._idx_mux_offset = self.prj_cfg_data["db_mater_cfg"].get("offset_idx_mux", 0)
+                    raise ValueError(f'{gate} gate for CAN not allowed PEAK allowed')
 
         except (KeyError, TypeError, AttributeError) as e:
             raise Exception(f'An error occured while extracting config project -> {e}')
@@ -214,12 +211,13 @@ class FrameMngmt():
     def unperform_cyclic(self)->None:
         """Unperform cyclic frame analyzer
         """
+        if self._is_serial_enable:
+            self._serial_istc.stop()
+            self._stop_srl_thread.set()
 
-        self._serial_istc.stop()
-        self._stop_srl_thread.set()
-
-        self._can_istc.receive_queue_stop()
-        self._can_istc.disconnect()
+        if self._is_can_enable:
+            self._can_istc.receive_queue_stop()
+            self._can_istc.disconnect()
     #--------------------------
     # _cyclic_serial_frame
     #--------------------------
@@ -304,7 +302,7 @@ class FrameMngmt():
         # Recherche du symbole correspondant à msg_id
         symbol = None
         for sym_name, sym in self.symbol.items():
-            if sym['msg_id'] == msg_id:
+            if sym['msg_id'] == int(msg_id):
                 symbol = sym
                 break
 
@@ -312,7 +310,8 @@ class FrameMngmt():
             print(f"[ERROR] : Symbole inconnu pour msg_id {msg_id}")
             return ''
 
-        signals:Dict = symbol['signals']  # dict signal_name -> bit position
+        # no mux use yet, take the idx mux '0'
+        signals:Dict = symbol['signals']['0']  # dict signal_name -> bit position
 
         for signal_name, start_bit in signals.items():
             sig_conf = self.signals.get(signal_name)
@@ -382,10 +381,6 @@ class FrameMngmt():
                                                     symbol['mux_info']['start_bit'], 
                                                     symbol['mux_info']['length'],
                                                     symbol['mux_info']['encoding'])
-            if idx_mux >= self._idx_mux_offset:
-                idx_mux -= self._idx_mux_offset
-            else:
-                print('[ERROR] : idx mux offset out of range')
 
             signals:Dict = symbol['signals'][str(idx_mux)]
 
@@ -622,7 +617,7 @@ class FrameMngmt():
 
                             if current_symbol:
                                 self.symbol[current_symbol]['msg_id'] = int(current_id)
-                                self.symbol[current_symbol]['msg_type'] = int(current_type)
+                                self.symbol[current_symbol]['msg_type'] = current_type
                             continue
 
                         match_len = SYM_PATTERN_LEN.match(line)
@@ -665,8 +660,8 @@ class FrameMngmt():
                                 new_start = position
                                 new_length = self.signals[signal_name]['length']
 
-                                for idx_mux, mux_signals in self.symbol[current_symbol].items():
-                                    for existing_signal, existing_start in mux_signals:
+                                try:
+                                    for existing_signal, existing_start  in self.symbol[current_symbol]['signals'][curr_idx_mux].items():
                                         existing_length = self.signals[existing_signal]['length']
 
                                         new_end = new_start + new_length - 1
@@ -676,7 +671,9 @@ class FrameMngmt():
                                             raise ValueError(
                                                 f"Conflit dans '{current_symbol}': signals '{signal_name}' (bits {new_start}-{new_end}) "
                                                 f"chevauche '{existing_signal}' (bits {existing_start}-{existing_end})"
-                                            )
+                                                )
+                                except (KeyError):
+                                    pass
 
                                 # Pas de conflit, on ajoute le signals
                                 if curr_idx_mux not in self.symbol[current_symbol]['signals'].keys():

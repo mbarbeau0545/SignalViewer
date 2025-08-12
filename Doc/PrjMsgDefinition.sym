@@ -20,8 +20,8 @@ Sig=AppAct_ModState unsigned 3 /e:module_state
 Sig=AppLgc_ModState unsigned 3 /e:module_state
 Sig=AppSdm_ModState unsigned 3 /e:module_state
 Sig=AppSpm_ModState unsigned 3 /e:module_state
-Sig=Cyclic_Duration unsigned 11 /max:511
-Sig=FastTaskDuration unsigned 11 /max:511
+Sig=Cyclic_Duration unsigned 16
+Sig=FastTaskDuration unsigned 12
 
 {SEND}
 
@@ -36,13 +36,11 @@ Sig=AppSdm_ModState 9
 Sig=AppSig_ModState 12
 Sig=AppSns_ModState 15
 Sig=AppSpm_ModState 18
-Sig=AppSys_ModState 21
 Sig=FmkCda_ModState 24
 Sig=FmkFdcan_ModState 27
 Sig=FmkHrt_ModState 30
 Sig=FmkIo_ModState 33
 Sig=FmkSrl_ModState 36
-Sig=FmkTim_ModState 39
-Sig=Cyclic_Duration 42
-Sig=FastTaskDuration 53
-
+Sig=FmkTim_ModState 21
+Sig=Cyclic_Duration 40
+Sig=FastTaskDuration 56

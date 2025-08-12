@@ -33,7 +33,11 @@ class SerialError(IntEnum):
     SerialErrorLost = 1 # gate close unexpectedly
 
 class SerialMngmt():
-    def __init__(self, f_baudrate:int, f_port_com:str, f_srl_err_cb = None):
+    def __init__(self, f_baudrate:int, 
+                 f_port_com:str,
+                 f_enable_log:bool = False, 
+                 f_dirlog:bool = "",
+                 f_srl_err_cb = None):
 
         self._baudrate = f_baudrate
         self._port_com:str = f_port_com
