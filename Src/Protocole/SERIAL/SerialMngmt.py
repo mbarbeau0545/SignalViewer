@@ -72,14 +72,14 @@ class SerialMngmt():
     #--------------------------
     # send_serial
     #--------------------------
-    def send_serial(self, f_frame:str)-> None:
+    def send_serial(self, f_frame:bytearray)-> None:
         """Send a frame to the serial line
 
         Args:
             f_frame (str): the frame you want to send
         """
         if self._serial and self._serial.is_open:
-            self._serial.write(f_frame.encode('utf-8'))
+            self._serial.write(f_frame)
         else:
             raise RuntimeError("Serial port not configured or not open")
 

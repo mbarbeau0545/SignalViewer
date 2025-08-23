@@ -21,7 +21,7 @@ from queue import Queue, Empty
 import importlib
 from Protocole.CAN.Mngmt.CanMngmt import get_can_interface, DriverCanUsed
 from Protocole.CAN.Mngmt.AbstractCAN import StructCANMsg, CanMngmtError
-from Protocole.SERIAL.SerialMngmt import SerialMngmt, SerialError
+from Protocole.SERIAL.SerialMngmt import SerialMngmt, SerialError, START_BYTES
 from Library.ModuleLog import MngLogFile, log
 #------------------------------------------------------------------------------
 #                                       CONSTANT
@@ -169,11 +169,79 @@ class FrameMngmt():
             pass
         
         return result
+    
+    #--------------------------
+    # send_signal_msg
+    #--------------------------
+    def send_signal_msg(self, f_sym_name:str, f_sigvalue:Dict[str,int], f_mux_idx = 0)->None:
+
+        """
+        Encode et envoie un message en fonction des signaux
+        """
+        # Trouver le symbole
+        if f_sym_name not in self.symbol:
+            print(f"[ERROR] : Symbole {f_sym_name} inconnu")
+            return
+
+        symbol = self.symbol[f_sym_name]
+        msg_id = int(str(symbol['msg_id']), 16)
+        print(msg_id)
+        signals = symbol['signals']['0']  # pas de mux pour l'instant
+
+        # Payload vide (par ex. 8 octets)
+        payload = bytearray(self._srl_frame_len - 3)  # sans header/id/checksum
+
+        for signal_name, start_bit in signals.items():
+            if signal_name not in f_sigvalue:
+                continue  # pas fourni
+
+            sig_conf = self.signals.get(signal_name)
+            if not sig_conf:
+                print(f"[ERROR] : Config signal {signal_name} absente")
+                continue
+
+            length = sig_conf['length']
+            encoding_flag = sig_conf.get('encoding', "little")
+            factor = sig_conf.get('factor', 1)
+            offset = sig_conf.get('offset', 0)
+            # mapping 
+            if encoding_flag.upper() == "MOTOROLA":
+                encoding = "big"
+            else:
+                encoding = "little"
+            # Appliquer l’inverse du décodage
+            eng_value = f_sigvalue[signal_name]
+            raw_value = int((eng_value - offset) / factor)
+
+            # update the value in container 
+            if signal_name not in self.sig_value:
+                self.sig_value[signal_name] = Queue()
+            
+            self.sig_value[signal_name].put([raw_value, eng_value, time.time_ns()])
+            self.__insert_bits(payload, raw_value, start_bit, length, encoding)
+
+        frame = bytearray()
+        frame.append(START_BYTES[0])
+        frame.append(START_BYTES[1])
+        frame.append(msg_id)
+        frame.extend(payload)
+
+        self._serial_istc.send_serial(frame)
+        print(f'[INFO] Serial send {frame.hex()}')
+
+
+    #--------------------------
+    # send_signal_msg
+    #--------------------------
+    def get_symbol_list(self)->List[str]:
+        """Get all symbol in a list
+        """
+        return [str(sym_name) for sym_name in self.symbol.keys()]
     #--------------------------
     # get_signal_value
     #--------------------------
     def get_signal_list(self) -> List[str]:
-        """Get a signals value
+        """Get a list with all signals
 
         Args:
             f_signal (str): the signals
@@ -183,6 +251,40 @@ class FrameMngmt():
         
         return [str(signal_name) for signal_name in self.signals.keys()]
 
+    
+    #--------------------------
+    # get_signal_value
+    #--------------------------
+    def get_signal_from_symbol(self, f_sym_name:str, f_idx_mux = 0) -> List[str]:
+        """Get a list with signals from a certain msg
+        """
+        retval_list = []
+        if f_sym_name in self.symbol.keys() and\
+        str(f_idx_mux) in self.symbol['signals'].keys():
+            retval_list = [signal for signal in self.symbol['signals'][f_idx_mux].keys()]
+
+        return retval_list
+
+    #--------------------------
+    # get_signal_info_from_symbol
+    #--------------------------
+    def get_signal_info_from_symbol(self, f_sym_name:str, f_idx_mux:str='0')->Dict[str, int]:
+        """get the name and lenght of signals in dicitonnary
+        """
+        retval_dict = {}
+        if f_sym_name in self.symbol.keys() and\
+        str(f_idx_mux) in self.symbol[f_sym_name]['signals'].keys():
+            for signal_name in self.symbol[f_sym_name]['signals'][f_idx_mux].keys():
+                retval_dict[signal_name] = self.signals[signal_name].copy()
+
+        else:
+            print('[ERROR] param invalid in get_signal_info_from_symbol')
+        return retval_dict
+
+
+    #--------------------------
+    # get_signal_value
+    #--------------------------
     def perform_cyclic(self)->None:
         """Start opening serial & can gate (depending on configuration)
         extract raw bufer from can & serial and interpret data to put it 
@@ -244,6 +346,8 @@ class FrameMngmt():
                         self.srlcan_log.LCF_SetMsgLog(log.INFO, buffer_log)
                         buffer_log = ''
                         cnt_buff_log = 0
+                else:
+                    buffer_log = ""
             else:
                 time.sleep(0.01)
 
@@ -459,6 +563,24 @@ class FrameMngmt():
             bit_val |= (bit << i)
 
         return bit_val
+    
+    #--------------------------
+    # __insert_bits
+    #--------------------------
+    def __insert_bits(self, buffer:bytearray, value:int, start_bit:int, length:int, encoding:str="little"):
+        """Insère une valeur entière dans le buffer à la position spécifiée"""
+        # Convertir buffer en entier global
+        total_bits = len(buffer) * 8
+        total_value = int.from_bytes(buffer, byteorder=encoding)
+
+        mask = ((1 << length) - 1) << start_bit
+        total_value &= ~mask  # clear bits
+        total_value |= (value << start_bit) & mask
+
+        # Remettre dans le buffer
+        new_bytes = total_value.to_bytes(len(buffer), byteorder=encoding)
+        for i in range(len(buffer)):
+            buffer[i] = new_bytes[i]
 
     #--------------------------
     # __interpret_frame
@@ -585,9 +707,6 @@ class FrameMngmt():
 
                     case 'SEND' | 'RECEIVE' | 'SENDRECEIVE':
                         if line.startswith('['):  # Ex: [Symbol1]
-                            if waiting_for_timeout == True and current_read != 'SEND':
-                                raise ValueError(f"Missing Timeout for symbol {current_symbol}")
-
                             current_symbol = line.strip().strip('[]')
                             self.symbol[current_symbol] = {
                                 'msg_id': None,

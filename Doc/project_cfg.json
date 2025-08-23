@@ -1,5 +1,5 @@
 {
-    "signal_cfg" : "Doc\\PrjMsgDefinition.sym",
+    "signal_cfg" : "D:/Project/Software/STM32/Gamma_fMotionPlanner/Doc/ConfigPrj/MessagingCfg/PrjMsgDefinition.sym",
     "serial_cfg" : {
         "port_com" : "COM3",
         "baudrate" : "115200",

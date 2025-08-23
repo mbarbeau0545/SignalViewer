@@ -23,10 +23,11 @@ import sys
 import os
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QPushButton,
-    QVBoxLayout, QWidget, QTabWidget
+    QVBoxLayout, QWidget, QTabWidget, QHBoxLayout, QLabel, QLineEdit, QComboBox,
+    QScrollArea, QFrame
 )
-from PyQt5.QtCore import QTimer
-from PyQt5.QtGui import QColor, QBrush
+from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtGui import QColor, QBrush, QFontMetrics
 
 import pyqtgraph as pg
 
@@ -52,39 +53,68 @@ class SignalViewer(QMainWindow):
     def __init__(self, f_prj_cfg:str):
         super().__init__()
 
-        # init frame isntance 
+        # init frame instance
         self.frame_isct = FrameMngmt(f_prj_cfg)
 
         self.setWindowTitle("Signal Viewer")
         self.resize(1200, 800)
 
-        self.signals_name:List[str] = self.frame_isct.get_signal_list()
-        self.signals_values:Dict[str,List[List]] = { 
-            signal_name : {} for signal_name in self.signals_name
+        self.signals_name: List[str] = self.frame_isct.get_signal_list()
+        self.signals_values: Dict[str, List[List]] = {
+            signal_name: {} for signal_name in self.signals_name
         }
-        self.previous_values:Dict[str, int] = { 
-            signal_name : -1 for signal_name in self.signals_name
+        self.previous_values: Dict[str, int] = {
+            signal_name: -1 for signal_name in self.signals_name
         }
+
+        self.frame_isct.get_symbol_list()
+
+        # ========================
+        # Création du QTabWidget
+        # ========================
+        self.tab_widget = QTabWidget()
+
+        # --- Onglet "Signals" ---
+        self.signals_widget = QWidget()
+        self.signals_layout = QVBoxLayout(self.signals_widget)
 
         self.table = QTableWidget(len(self.signals_name), 4)
         self.table.setHorizontalHeaderLabels(["Signal", "Raw Value", "Value", "Graph"])
-        # resize automatically column 'Value' and 'Signal' cause Enum & Signal may take long place
-        self.table.setColumnWidth(2, 150)
-        self.table.setColumnWidth(0, 150)
+        self.table.setColumnWidth(2, 150)  # colonne Value
+        self.table.setColumnWidth(0, 150)  # colonne Signal
+        self.signals_layout.addWidget(self.table)
 
+        self.tab_widget.addTab(self.signals_widget, "Signals")
 
-        self.tab_widget = QTabWidget()
+        # --- Onglet "Message Sender" ---
+        self.msg_sender_widget = QWidget()
+        self.msg_sender_layout = QVBoxLayout(self.msg_sender_widget)
 
-        layout = QVBoxLayout()
-        layout.addWidget(self.table)
-        layout.addWidget(self.tab_widget)
+        btn_add_msg = QPushButton("Add message")
+        btn_add_msg.clicked.connect(self.__add_message_row)
+        self.msg_sender_layout.addWidget(btn_add_msg)
 
+        # ScrollArea qui contiendra les messages
+        self.msg_scroll = QScrollArea()
+        self.msg_scroll.setWidgetResizable(True)
+        self.msg_container = QWidget()
+        self.msg_rows_container = QVBoxLayout(self.msg_container)
+        self.msg_container.setLayout(self.msg_rows_container)
+
+        self.msg_scroll.setWidget(self.msg_container)
+        self.msg_sender_layout.addWidget(self.msg_scroll)
+
+        self.tab_widget.addTab(self.msg_sender_widget, "Message Sender")
+
+        # === Ajout du tab_widget comme contenu principal ===
         container = QWidget()
-        container.setLayout(layout)
+        layout = QVBoxLayout(container)
+        layout.addWidget(self.tab_widget)
         self.setCentralWidget(container)
 
-        
-        
+        # ========================
+        # Remplissage de la table Signals
+        # ========================
         for row, signal_name in enumerate(self.signals_name):
             self.table.setItem(row, 0, QTableWidgetItem(signal_name))
             # Bouton Graph
@@ -92,13 +122,14 @@ class SignalViewer(QMainWindow):
             btn.clicked.connect(lambda _, s=signal_name: self.__open_graph_tab(s))
             self.table.setCellWidget(row, 3, btn)
 
-        # start performing frame update 
+        # ========================
+        # Timers de mise à jour
+        # ========================
         self.frame_isct.perform_cyclic()
-        # Timer de mise à jour
         self.timer = QTimer()
         self.timer.timeout.connect(self.__refresh_table)
         self.timer.start(REFRESH_IMH_SECONDS)  # toutes les 0.3s
-        
+
         self._timer_interrupt = QTimer()
         self._timer_interrupt.start(500)  # 500 ms
         self._timer_interrupt.timeout.connect(lambda: None)  
@@ -227,6 +258,186 @@ class SignalViewer(QMainWindow):
             self.tab_widget.removeTab(index)
             f_widget._timer.stop()  # stop timer for this graph
             f_widget.deleteLater()
+
+    #--------------------------
+    # __add_message_row
+    #--------------------------
+    def __add_message_row(self):
+        """Ajoute une ligne pour configurer un message"""
+        # === Conteneur visuel (cadre avec bordure) ===
+        row_widget = QFrame()
+        row_widget.setFrameShape(QFrame.StyledPanel)
+        row_widget.setFrameShadow(QFrame.Raised)
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(10, 5, 10, 5)
+        row_layout.setSpacing(15)
+
+        # === Sélecteur du symbole ===
+        combo = QComboBox()
+        combo.addItems(self.frame_isct.get_symbol_list())
+        combo.setMinimumWidth(180)
+        row_layout.addWidget(combo)
+
+        # === Table des signaux ===
+        sig_table = QTableWidget()
+        sig_table.setColumnCount(2)
+        sig_table.setHorizontalHeaderLabels(["Signal (bits)", "Value"])
+        sig_table.horizontalHeader().setStretchLastSection(True)
+        sig_table.setAlternatingRowColors(True)
+        sig_table.setStyleSheet("""
+            QTableWidget::item { padding: 4px; }
+            QHeaderView::section {
+                background-color: #e0e0e0;
+                font-weight: bold;
+                padding: 4px;
+            }
+        """)
+        row_layout.addWidget(sig_table, 1)
+
+        # Remplissage initial si des symboles existent
+        if combo.count() > 0:
+            self.__populate_signals(sig_table, combo.currentText())
+
+        combo.currentTextChanged.connect(
+            lambda sym: self.__populate_signals(sig_table, sym)
+        )
+
+        # === Paramètres en colonne droite ===
+        right_layout = QVBoxLayout()
+        right_layout.setSpacing(8)
+
+        # Cyclic send
+        cyc_layout = QHBoxLayout()
+        cyc_layout.addWidget(QLabel("Cyclic (ms):"))
+        cyclic_edit = QLineEdit("0")
+        cyclic_edit.setFixedWidth(60)
+        cyc_layout.addWidget(cyclic_edit)
+        right_layout.addLayout(cyc_layout)
+
+        # Bouton Send
+        btn_send = QPushButton("Send")
+        btn_send.setFixedWidth(70)
+        right_layout.addWidget(btn_send)
+
+        btn_send.clicked.connect(
+            lambda _, cb=combo, st=sig_table, ce=cyclic_edit, rw=row_widget:
+                self.__send_message(cb.currentText(), st, ce.text(), rw)
+        )
+
+        # Bouton Delete
+        btn_delete = QPushButton("Delete")
+        btn_delete.setFixedWidth(70)
+        btn_delete.setStyleSheet("background-color: #f28b82;")
+        right_layout.addWidget(btn_delete)
+
+        btn_delete.clicked.connect(lambda _, rw=row_widget: self.__delete_message_row(rw))
+
+        # Espacement en bas
+        right_layout.addStretch()
+        row_layout.addLayout(right_layout)
+
+        # Ajouter le tout dans la zone scrollable
+        self.msg_rows_container.addWidget(row_widget)
+
+    #--------------------------
+    # __populate_signals
+    #--------------------------
+    def __populate_signals(self, table: QTableWidget, sym_name: str):
+        """Remplit la table des signaux pour le message choisi"""
+        table.clearContents()
+        table.setRowCount(0)
+
+        signals = self.frame_isct.get_signal_info_from_symbol(sym_name)
+        if not signals:
+            return
+
+        row_height = 30
+        max_visible_rows = 5
+
+        table.setRowCount(len(signals))
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["Signal (bits), (factor), (offset)", "Value"])
+        table.horizontalHeader().setStretchLastSection(True)
+
+        # Calcul largeur colonne signal
+        font = table.font()
+        metrics = QFontMetrics(font)
+        max_width = 0
+
+        for row, (sig_name, info_sig) in enumerate(signals.items()):
+            text = f"{sig_name} ({info_sig['length']}b, {info_sig['factor']}*, {info_sig['offset']}+)"
+            item = QTableWidgetItem(text)
+            item.setFlags(Qt.ItemIsEnabled)
+            table.setItem(row, 0, item)
+
+            edit = QLineEdit()
+            edit.setObjectName(sig_name)
+            table.setCellWidget(row, 1, edit)
+
+            table.setRowHeight(row, row_height)
+
+            # Mesure largeur
+            width = metrics.horizontalAdvance(text) + 20  # + marge
+            if width > max_width:
+                max_width = width
+
+        # Ajuster la largeur de la colonne signal
+        table.setColumnWidth(0, max_width)
+
+        # Ajuster hauteur table
+        header_height = table.horizontalHeader().height()
+        visible_rows = min(len(signals), max_visible_rows)
+        table.setFixedHeight(header_height + row_height * visible_rows)
+
+        # Scroll selon le nombre de lignes
+        table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAlwaysOff if len(signals) <= max_visible_rows else Qt.ScrollBarAsNeeded
+        )
+
+
+
+    #--------------------------
+    # __delete_message_row
+    #--------------------------
+    def __delete_message_row(self, row_widget: QWidget):
+        """Supprime une ligne message (UI + timer éventuel)"""
+        # Si on a attaché un timer pour cyclic send, on l'arrête
+        if hasattr(row_widget, "_timer") and row_widget._timer is not None:
+            row_widget._timer.stop()
+            row_widget._timer.deleteLater()
+
+        # Supprime le widget du layout et détruit
+        self.msg_rows_container.removeWidget(row_widget)
+        row_widget.deleteLater()
+        
+    #--------------------------
+    # __send_message
+    #--------------------------
+    def __send_message(self, sym_name: str, sig_layout: QHBoxLayout, cyclic_val: str, row_widget: QWidget):
+        signals = {}
+        if sig_layout.count():
+            table = sig_layout.itemAt(0).widget()
+            if isinstance(table, QTableWidget):
+                for row in range(table.rowCount()):
+                    sig_item = table.item(row, 0)
+                    sig_name = sig_item.text().split(" ")[0]
+                    edit = table.cellWidget(row, 1)
+                    try:
+                        signals[sig_name] = int(edit.text())
+                    except (ValueError, AttributeError):
+                        signals[sig_name] = 0
+
+        cyclic_val = int(cyclic_val) if cyclic_val.isdigit() else 0
+        if int(cyclic_val) > 0:
+            print(f"[Cyclic] Send {sym_name} every {cyclic_val}ms with {signals}")
+            # QTimer pour envoi périodique
+            timer = QTimer(row_widget)
+            timer.timeout.connect(lambda: self.frame_isct.send_signal_msg(sym_name, signals))
+            timer.start(int(cyclic_val) )
+            row_widget._timer = timer
+        else:
+            print(f"[Once] Send {sym_name} with {signals}")
+            self.frame_isct.send_signal_msg(sym_name, signals)
 #------------------------------------------------------------------------------
 #                             FUNCTION IMPLMENTATION
 #------------------------------------------------------------------------------
