@@ -413,27 +413,24 @@ class SignalViewer(QMainWindow):
     #--------------------------
     # __send_message
     #--------------------------
-    def __send_message(self, sym_name: str, sig_layout: QHBoxLayout, cyclic_val: str, row_widget: QWidget):
+    def __send_message(self, sym_name: str, table: QTableWidget, cyclic_val: str, row_widget: QWidget):
         signals = {}
-        if sig_layout.count():
-            table = sig_layout.itemAt(0).widget()
-            if isinstance(table, QTableWidget):
-                for row in range(table.rowCount()):
-                    sig_item = table.item(row, 0)
-                    sig_name = sig_item.text().split(" ")[0]
-                    edit = table.cellWidget(row, 1)
-                    try:
-                        signals[sig_name] = int(edit.text())
-                    except (ValueError, AttributeError):
-                        signals[sig_name] = 0
+        if table and isinstance(table, QTableWidget):
+            for row in range(table.rowCount()):
+                sig_item = table.item(row, 0)
+                sig_name = sig_item.text().split(" ")[0] if sig_item else ""
+                edit = table.cellWidget(row, 1)
+                try:
+                    signals[sig_name] = int(edit.text())
+                except (ValueError, AttributeError):
+                    signals[sig_name] = 0
 
         cyclic_val = int(cyclic_val) if cyclic_val.isdigit() else 0
-        if int(cyclic_val) > 0:
+        if cyclic_val > 0:
             print(f"[Cyclic] Send {sym_name} every {cyclic_val}ms with {signals}")
-            # QTimer pour envoi périodique
             timer = QTimer(row_widget)
             timer.timeout.connect(lambda: self.frame_isct.send_signal_msg(sym_name, signals))
-            timer.start(int(cyclic_val) )
+            timer.start(cyclic_val)
             row_widget._timer = timer
         else:
             print(f"[Once] Send {sym_name} with {signals}")

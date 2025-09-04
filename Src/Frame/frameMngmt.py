@@ -644,19 +644,19 @@ class FrameMngmt():
             for line in file_iter:
                 line = line.strip()
 
-                if "ENUMS" in line:
+                if "ENUMS}" in line:
                     current_read = 'ENUMS'
                     continue
-                elif "SIGNALS" in line:
+                elif "SIGNALS}" in line:
                     current_read = 'SIGNALS'
                     continue
-                elif "SENDRECEIVE" in line:
+                elif "SENDRECEIVE}" in line:
                     current_read = 'SENDRECEIVE'
                     continue
-                elif "RECEIVE" in line:
+                elif "RECEIVE}" in line:
                     current_read = 'RECEIVE'
                     continue
-                elif "SEND" in line:
+                elif "SEND}" in line:
                     current_read = 'SEND'
                     continue
 
