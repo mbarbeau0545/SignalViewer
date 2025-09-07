@@ -32,6 +32,14 @@ class SerialError(IntEnum):
     SerialErrorTimeout = 0 # no msg received after x ms
     SerialErrorLost = 1 # gate close unexpectedly
 
+from queue import Queue, Empty
+import serial, threading, time
+from typing import Optional
+
+SRL_TIMEOUT = 5.0  # exemple: 5 secondes
+START_BYTES = b"\xAA\x55"  # exemple à adapter
+
+
 class SerialMngmt():
     def __init__(self, f_baudrate:int, 
                  f_port_com:str,
@@ -43,7 +51,7 @@ class SerialMngmt():
         self._port_com:str = f_port_com
         self._serial: Optional[serial.Serial] = None
         self._frame_size : int = 0
-        self._receive_queue: Queue = Queue()
+        self._receive_queue: Queue = Queue()  # contiendra (frame, timestamp)
         self._rx_thread: Optional[threading.Thread] = None
         self._stop_thread = threading.Event()
         self._buffer = bytearray()
@@ -52,15 +60,9 @@ class SerialMngmt():
 
 
     #--------------------------
-    # send_serial
+    # open_serial_line
     #--------------------------
     def open_serial_line(self)->None:
-        """Configure a serial line with PySerial library
-
-        Args:
-            f_baudrate (int): serial line baudrate
-            f_prot (str); the COM port 
-        """
         try:
             self._serial = serial.Serial(
                 port=self._port_com,
@@ -68,45 +70,32 @@ class SerialMngmt():
                 timeout=0.1
             )
         except Exception as e:
-            raise Exception('Unable to start the serial line, error : %d',e)
+            raise Exception(f'Unable to start the serial line, error : {e}')
+
+
     #--------------------------
     # send_serial
     #--------------------------
     def send_serial(self, f_frame:bytearray)-> None:
-        """Send a frame to the serial line
-
-        Args:
-            f_frame (str): the frame you want to send
-        """
         if self._serial and self._serial.is_open:
             self._serial.write(f_frame)
         else:
             raise RuntimeError("Serial port not configured or not open")
 
+
     #--------------------------
     # read_serial
     #--------------------------
     def read_serial(self)-> str:
-        """Read Hardware buffer directly 
-
-        Returns:
-            str: the complete buffer
-        """
         if self._serial and self._serial.in_waiting:
             return self._serial.read(self._serial.in_waiting).decode('utf-8')
         return ""
 
+
     #--------------------------
-    # read_serial
+    # configure_reception
     #--------------------------
     def configure_reception(self, f_nbByte:int)->None:
-        """Configure the reception line 
-            to make packet of f_nbByte in a queue
-            contact 
-
-        Args:
-            f_nbByte (int): _description_
-        """
         if not self._serial:
             raise RuntimeError("Serial port must be configured before reception")
 
@@ -115,14 +104,16 @@ class SerialMngmt():
         self._rx_thread = threading.Thread(target=self.__perform_cyclic, daemon=True)
         self._rx_thread.start()
     
+
     #--------------------------
     # get_frame
     #--------------------------
-    def get_frame(self, timeout: float = 0.0)->Optional[bytes]:
-        """Get one frame from the Queue
+    def get_frame(self, timeout: float = 0.0)->Optional[tuple[bytes, int]]:
+        """
+        Get one frame from the Queue
 
         Returns:
-            Optional[bytes]: the frame
+            Optional[tuple[bytes, float]]: (frame, timestamp en secondes)
         """
         try:
             return self._receive_queue.get(timeout=timeout)
@@ -134,33 +125,30 @@ class SerialMngmt():
     # __perform_cyclic
     #--------------------------
     def __perform_cyclic(self):
-        """Read f_nbByte from serial port and put it in queue continuously
-        """  
         self._last_received_time = time.time()
         while not self._stop_thread.is_set():
             try:
                 if self._serial.in_waiting:
                     data = self._serial.read(self._serial.in_waiting)
                     if data:
-                        self._last_received_time = time.time()  # reset timer
+                        self._last_received_time = time.time()
                         self._buffer.extend(data)
                         self._extract_frames()
             except serial.SerialException as e:
-                # Erreur liée au port série, probablement déconnexion
                 print(f"[ERROR] Serial port error: {e}")
-                # try to reconnect 
                 self.__try_serial_reco()
             except Exception as e:
-                # Autres erreurs inattendues, tu peux aussi les logguer
                 print(f"[ERROR] Unexpected error: {e}")
                 self._stop_thread.set()
-            # petite pause pour ne pas saturer le CPU
-            # Vérification du timeout
+
             if time.time() - self._last_received_time > SRL_TIMEOUT:
                 print("[WARNING] No data received for 5 seconds.")
-                self.error_callback(SerialError.SerialErrorTimeout)
-                self._last_received_time = time.time()  # évite de spammer l'alerte
+                if self.error_callback:
+                    self.error_callback(SerialError.SerialErrorTimeout)
+                self._last_received_time = time.time()
+
             time.sleep(0.01)
+
 
     #--------------------------
     # _find_start_bytes
@@ -171,12 +159,12 @@ class SerialMngmt():
                 return i
         return -1
     
+
     #--------------------------
     # _extract_frames
     #--------------------------
     def _extract_frames(self):
         while len(self._buffer) >= self._frame_size:
-            # Cherche le start byte dans la fenêtre glissante
             start_index = self._find_start_bytes()
             if start_index == -1:
                 self._buffer.clear()
@@ -186,7 +174,8 @@ class SerialMngmt():
 
             if len(self._buffer) >= self._frame_size:
                 frame = self._buffer[:self._frame_size]
-                self._receive_queue.put(bytes(frame))
+                ts = time.time_ns()  # timestamp en nanoseconde
+                self._receive_queue.put((bytes(frame), ts))
                 del self._buffer[:self._frame_size]
             else:
                 break

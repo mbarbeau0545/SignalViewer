@@ -11,10 +11,11 @@
 #                                       IMPORT
 #------------------------------------------------------------------------------
 import sys, threading
+from collections import deque
 import os, time
 import json
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from queue import Queue, Empty
 
 
@@ -23,6 +24,7 @@ from Protocole.CAN.Mngmt.CanMngmt import get_can_interface, DriverCanUsed
 from Protocole.CAN.Mngmt.AbstractCAN import StructCANMsg, CanMngmtError
 from Protocole.SERIAL.SerialMngmt import SerialMngmt, SerialError, START_BYTES
 from Library.ModuleLog import MngLogFile, log
+
 #------------------------------------------------------------------------------
 #                                       CONSTANT
 #------------------------------------------------------------------------------
@@ -138,6 +140,7 @@ class FrameMngmt():
         self._can_frame_thread: Optional[threading.Thread] = None
         self._stop_srl_thread = threading.Event()
         self._stop_can_thread = threading.Event()
+        self._start_time = time.time_ns()
 
         #---- extract signals enum and stuff ----#
         self.__extract_signal_cfg()
@@ -336,7 +339,7 @@ class FrameMngmt():
         buffer_log:str = ''
 
         while not self._stop_srl_thread.is_set():
-            srl_frame = self._serial_istc.get_frame()
+            srl_frame = self._serial_istc.get_frame(timeout=0.05)
             if srl_frame is not None:
                 buffer_log += self.__decode_srl_frame(srl_frame)
 
@@ -349,7 +352,7 @@ class FrameMngmt():
                 else:
                     buffer_log = ""
             else:
-                time.sleep(0.01)
+                time.sleep(0.001)
 
     
     #--------------------------
@@ -382,26 +385,26 @@ class FrameMngmt():
                 
             else:
                 #print('got nothing')
-                time.sleep(0.01)
+                time.sleep(0.001)
                 
 
     #--------------------------
     # __decode_srl_frame
     #--------------------------
-    def __decode_srl_frame(self, f_srl_frame:bytes)->str:
+    def __decode_srl_frame(self, f_srl_frame:Tuple[bytes,int])->str:
         """Interpret a serial frame into signals value
         Args: 
             f_srl_frame (bytes); the frame to decode
         Raises:
         """
         buffer_log = ''
-        current_time = time.time_ns()
-        if len(f_srl_frame) < self._srl_frame_len:
+
+        srl_data, ts = f_srl_frame
+        if len(srl_data) < self._srl_frame_len:
             print("[ERROR] : Trame trop courte")
             return ''
-
         # 3e octet = id (en hex string pour correspondre à msg_id dans symbol)
-        msg_id = f"{f_srl_frame[2]:03X}"  # ex: '010' ou '020'
+        msg_id = f"{srl_data[2]:03X}"  # ex: '010' ou '020'
 
         # Recherche du symbole correspondant à msg_id
         symbol = None
@@ -430,7 +433,7 @@ class FrameMngmt():
             enum_name = sig_conf.get('enum')
 
             # Extraire la valeur brute du signals (bitfield)
-            raw_value = self.__extract_bits(f_srl_frame[3:], start_bit, length, encoding)
+            raw_value = self.__extract_bits(srl_data[3:], start_bit, length, encoding)
 
             # Si enum est défini, traduire la valeur
             if enum_name and enum_name in self.enum:
@@ -444,8 +447,8 @@ class FrameMngmt():
             # Stocker la valeur dans la queue associée
             if signal_name not in self.sig_value:
                 self.sig_value[signal_name] = Queue()
-            self.sig_value[signal_name].put([raw_value, value, current_time])
-            buffer_log += f'{current_time} {msg_id} {raw_value} {value}'
+            self.sig_value[signal_name].put([raw_value, value, ts])
+            buffer_log += f'{(ts - self._start_time) / 1e6} {signal_name} {raw_value} {value}\n'
 
         return buffer_log
 

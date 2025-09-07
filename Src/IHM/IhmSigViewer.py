@@ -12,19 +12,13 @@
 #------------------------------------------------------------------------------
 import sys
 import os
-"""from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QPushButton,
-    QVBoxLayout, QWidget, QTabWidget
-)
-from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QColor, QBrush"""
-
+from collections import deque
 import sys
 import os
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QPushButton,
     QVBoxLayout, QWidget, QTabWidget, QHBoxLayout, QLabel, QLineEdit, QComboBox,
-    QScrollArea, QFrame
+    QScrollArea, QFrame, QAction, QMenu
 )
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QColor, QBrush, QFontMetrics
@@ -37,8 +31,8 @@ from typing import List, Dict
 #------------------------------------------------------------------------------
 #                                       CONSTANT
 #------------------------------------------------------------------------------
-REFRESH_IMH_SECONDS = 50
-PLOT_MAX_POINT = 1000
+REFRESH_IMH_SECONDS = 20
+PLOT_MAX_POINT = 2000
 # CAUTION : Automatic generated code section: Start #
 
 # CAUTION : Automatic generated code section: End #
@@ -47,10 +41,7 @@ PLOT_MAX_POINT = 1000
 #------------------------------------------------------------------------------
 
 class SignalViewer(QMainWindow):
-    #--------------------------
-    # __init__
-    #--------------------------
-    def __init__(self, f_prj_cfg:str):
+    def __init__(self, f_prj_cfg: str):
         super().__init__()
 
         # init frame instance
@@ -59,13 +50,14 @@ class SignalViewer(QMainWindow):
         self.setWindowTitle("Signal Viewer")
         self.resize(1200, 800)
 
-        self.signals_name: List[str] = self.frame_isct.get_signal_list()
-        self.signals_values: Dict[str, List[List]] = {
-            signal_name: {} for signal_name in self.signals_name
+        self.signals_name = self.frame_isct.get_signal_list()
+
+        # utilisation de deque pour éviter l'écrasement
+        self.signals_values = {
+            signal_name: deque(maxlen=PLOT_MAX_POINT)
+            for signal_name in self.signals_name
         }
-        self.previous_values: Dict[str, int] = {
-            signal_name: -1 for signal_name in self.signals_name
-        }
+        self.previous_values = {signal_name: -1 for signal_name in self.signals_name}
 
         self.frame_isct.get_symbol_list()
 
@@ -128,11 +120,12 @@ class SignalViewer(QMainWindow):
         self.frame_isct.perform_cyclic()
         self.timer = QTimer()
         self.timer.timeout.connect(self.__refresh_table)
-        self.timer.start(REFRESH_IMH_SECONDS)  # toutes les 0.3s
+        self.timer.start(REFRESH_IMH_SECONDS)  # 50 ms
 
+        # timer de garde (évite freeze de l’UI si pas de signal)
         self._timer_interrupt = QTimer()
-        self._timer_interrupt.start(500)  # 500 ms
-        self._timer_interrupt.timeout.connect(lambda: None)  
+        self._timer_interrupt.start(REFRESH_IMH_SECONDS)
+        self._timer_interrupt.timeout.connect(lambda: None)
 
 
     #--------------------------
@@ -145,110 +138,180 @@ class SignalViewer(QMainWindow):
     #--------------------------
     # __refresh_table
     #--------------------------
+     #--------------------------
+    # __refresh_table
+    #--------------------------
     def __refresh_table(self):
         for row, signal_name in enumerate(self.signals_name):
-            sig_val:List[List] = self.frame_isct.get_signal_value(signal_name)
+            sig_val = self.frame_isct.get_signal_value(signal_name)
             if sig_val == [[]]:
                 continue
-            # store if for graph if needed
-            self.signals_values[signal_name] = sig_val
-            for signal_info in sig_val:
-            
-                # get the previous value 
+
+            # >>> au lieu d’écraser, on empile dans une deque
+            for sig_info in sig_val:
+                if sig_info:
+                    self.signals_values[signal_name].append(sig_info)
+
+            # Mise à jour table (affiche la dernière valeur reçue)
+            if sig_val and sig_val[-1]:
+                raw_val = str(sig_val[-1][0])
+                calc_val = str(sig_val[-1][1])
                 prev_raw = self.previous_values.get(signal_name)
 
-                if signal_info != []:
-                    raw_val = str(signal_info[0]) # idx 0 is rawValue
-                    calc_val = str(signal_info[1]) # idx 1 is Compute Value
-                else: # nothing receive 
-                    raw_val = None
-                    calc_val = None
+                item_raw = QTableWidgetItem(raw_val)
+                item_calc = QTableWidgetItem(calc_val)
+                item_raw.setForeground(QBrush(QColor('black')))
+                item_calc.setForeground(QBrush(QColor('black')))
+                self.table.setItem(row, 1, item_raw)
+                self.table.setItem(row, 2, item_calc)
 
-                if raw_val is not None and calc_val is not None:
-                    # Mise à jour Raw Value
-                    item_raw = QTableWidgetItem(raw_val)
-                    item_raw.setForeground(QBrush(QColor('black')))
-                    self.table.setItem(row, 1, item_raw)
+                if prev_raw is not None and prev_raw != raw_val:
+                    item_raw.setBackground(QColor("yellow"))
+                    item_calc.setBackground(QColor("yellow"))
+                else:
+                    item_raw.setBackground(QColor("white"))
+                    item_calc.setBackground(QColor("white"))
 
-                    # Mise à jour Calculated Value
-                    item_calc = QTableWidgetItem(calc_val)
-                    item_calc.setForeground(QBrush(QColor('black')))
-                    self.table.setItem(row, 2, item_calc)
+                self.previous_values[signal_name] = raw_val
 
-                    # Coloration si valeur changée
-                    
-                    if prev_raw is not None and prev_raw != raw_val:
-                        item_raw.setBackground(QColor("yellow"))
-                        item_calc.setBackground(QColor("yellow"))
-                    else:
-                        item_raw.setBackground(QColor("white"))
-                        item_calc.setBackground(QColor("white"))
-
-                    self.previous_values[signal_name] = raw_val
-
+    #--------------------------
+    # __open_graph_tab
+    #--------------------------
     #--------------------------
     # __open_graph_tab
     #--------------------------
     def __open_graph_tab(self, signal_name):
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        btn_close = QPushButton("Close")
-        layout.addWidget(btn_close)
-        btn_close.clicked.connect(lambda _, w=widget: self.__close_tab(w))
 
-        plot_widget = pg.PlotWidget(title=signal_name)
+        # Boutons
+        btn_toggle = QPushButton("Stop")
+        btn_close = QPushButton("Close Tab")
+        layout.addWidget(btn_toggle)
+        layout.addWidget(btn_close)
+
+        btn_close.clicked.connect(lambda _, w=widget: self.__close_tab(w))
+        btn_toggle.clicked.connect(lambda _, w=widget, b=btn_toggle: self.__toggle_pause(w, b))
+
+        # Plot
+        plot_widget = pg.PlotWidget(title="Signals")
         plot_widget.setLabel('bottom', 'Temps', units='s')
         plot_widget.setLabel('left', 'Valeur')
+        plot_widget.addLegend()
+        plot_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        plot_widget.customContextMenuRequested.connect(
+            lambda pos, w=widget: self.__show_graph_context_menu(w, pos)
+        )
         layout.addWidget(plot_widget)
 
         # Ajout de l'onglet
         self.tab_widget.addTab(widget, signal_name)
         self.tab_widget.setCurrentWidget(widget)
 
-        # Stocker les valeurs
-        widget._times = []
-        widget._values = []
+        # Stockage
+        widget._curves = {}
+        widget._plot_widget = plot_widget
         widget._t0 = None
+        widget._paused = False
 
-        # Trace (ligne)
-        curve = plot_widget.plot(widget._times, widget._values, pen='y')
-        widget._curve = curve
+        # Ajouter le premier signal
+        self.__add_signal_to_tab(widget, signal_name)
 
-        # Timer d'update
+        # Fonction update
         def update_plot():
-            sig_val = self.signals_values.get(signal_name, [])
-            if not sig_val:
+            if widget._paused:
                 return
 
+            # init t0 commun
             if widget._t0 is None:
-                for sig_info in sig_val:
-                    if sig_info:
-                        widget._t0 = sig_info[2]
-                        break
+                min_t0 = None
+                for sig_name in widget._curves.keys():
+                    if self.signals_values[sig_name]:
+                        t0_candidate = self.signals_values[sig_name][0][2]
+                        if min_t0 is None or t0_candidate < min_t0:
+                            min_t0 = t0_candidate
+                widget._t0 = min_t0
                 if widget._t0 is None:
                     return
 
-            for sig_info in sig_val:
-                if sig_info and int(sig_info[2]) >= widget._t0:
-                    t_sec = (sig_info[2] - widget._t0) / 1e9
-                    if not widget._times or t_sec > widget._times[-1]:
-                        widget._times.append(t_sec)
-                        widget._values.append(sig_info[0])
+            # mise à jour par signal
+            for sig_name, sig_data in widget._curves.items():
+                while self.signals_values[sig_name]:
+                    raw, calc, ts = self.signals_values[sig_name][0]
+                    if ts < widget._t0:
+                        self.signals_values[sig_name].popleft()
+                        continue
 
-            # Limiter les points affichés
-            if len(widget._times) > PLOT_MAX_POINT:
-                widget._times = widget._times[-PLOT_MAX_POINT:]
-                widget._values = widget._values[-PLOT_MAX_POINT:]
+                    t_sec = (ts - widget._t0) / 1e9
+                    if not sig_data["times"] or t_sec > sig_data["times"][-1]:
+                        sig_data["times"].append(t_sec)
+                        sig_data["values"].append(raw)
+                    self.signals_values[sig_name].popleft()
 
-            if len(widget._times) != 1:
-                widget._curve.setData(widget._times, widget._values)
+                # découpe et affichage
+                if len(sig_data["times"]) > PLOT_MAX_POINT:
+                    sig_data["times"] = sig_data["times"][-PLOT_MAX_POINT:]
+                    sig_data["values"] = sig_data["values"][-PLOT_MAX_POINT:]
+
+                if len(sig_data["times"]) > 1:
+                    sig_data["curve"].setData(sig_data["times"], sig_data["values"])
 
         # Timer Qt
         timer = QTimer(widget)
         timer.timeout.connect(update_plot)
-        timer.start(50)  # toutes les 50 ms (~20 FPS)
+        timer.start(REFRESH_IMH_SECONDS)
         widget._timer = timer
 
+    #--------------------------
+    # __add_signal_to_tab
+    #--------------------------
+    def __add_signal_to_tab(self, widget, signal_name: str):
+        if signal_name in widget._curves:
+            return  # déjà présent
+        color = pg.intColor(len(widget._curves))  # couleur auto
+        curve = widget._plot_widget.plot([], [], pen=color, name=signal_name)
+        widget._curves[signal_name] = {
+            "times": [],
+            "values": [],
+            "curve": curve
+        }
+
+    #--------------------------
+    # __remove_signal_from_tab
+    #--------------------------
+    def __remove_signal_from_tab(self, widget, signal_name: str):
+        if signal_name in widget._curves:
+            widget._plot_widget.removeItem(widget._curves[signal_name]["curve"])
+            del widget._curves[signal_name]
+      #--------------------------
+    # __show_graph_context_menu
+    #--------------------------
+    def __show_graph_context_menu(self, widget, pos):
+        menu = QMenu(widget)
+
+        # Signaux déjà affichés
+        if widget._curves:
+            submenu_remove = menu.addMenu("Supprimer un signal")
+            for sig_name in list(widget._curves.keys()):
+                action = QAction(sig_name, self)
+                action.triggered.connect(
+                    lambda _, s=sig_name: self.__remove_signal_from_tab(widget, s)
+                )
+                submenu_remove.addAction(action)
+
+        # Signaux disponibles à ajouter
+        available = [s for s in self.signals_name if s not in widget._curves]
+        if available:
+            submenu_add = menu.addMenu("Ajouter un signal")
+            for sig_name in available:
+                action = QAction(sig_name, self)
+                action.triggered.connect(
+                    lambda _, s=sig_name: self.__add_signal_to_tab(widget, s)
+                )
+                submenu_add.addAction(action)
+
+        # Afficher le menu au bon endroit
+        menu.exec_(widget._plot_widget.mapToGlobal(pos))
     #--------------------------
     # __close_tab
     #--------------------------
@@ -259,6 +322,9 @@ class SignalViewer(QMainWindow):
             f_widget._timer.stop()  # stop timer for this graph
             f_widget.deleteLater()
 
+    def __toggle_pause(self, f_widget, f_btn_toggle):
+        f_widget._paused = not f_widget._paused
+        f_btn_toggle.setText("Start" if f_widget._paused else "Stop")
     #--------------------------
     # __add_message_row
     #--------------------------

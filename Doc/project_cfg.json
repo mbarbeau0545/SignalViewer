@@ -5,9 +5,10 @@
         "baudrate" : "115200",
         "is_enable" : true,
         "frame_len" : 11,
-        "enable_srl_msg_logg" : false,
-        "enable_sig_logg" : false,
-        "srl_log_path" : "Doc/Log"
+        "enable_srl_msg_logg" : true,
+        "enable_sig_logg" : true,
+        "srl_log_path" : "Doc/Log",
+        "sig_log_path" : "Doc/Log"
     },
     "can_cfg" : {
         "baudrate" : "PCAN_BAUD_250K",
@@ -17,6 +18,7 @@
         "enable_sig_logg" : false,
         "id_to_ignore" : [],
         "gate" : "Peak",
+        "srl_log_path" : "Doc/Log",
         "can_log_path" : "Doc/Log"
 
     }
