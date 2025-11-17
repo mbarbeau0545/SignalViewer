@@ -1,0 +1,22 @@
+{
+  "MTR_XL": {
+    "MTR_XL_PULSE": -5000,
+    "MTR_XL_SPEED": 1000,
+    "MTR_XL_TRIGTIME": 0
+  },
+  "MTR_XR": {
+    "MTR_XR_PULSE": 2500,
+    "MTR_XR_SPEED": 500,
+    "MTR_XR_TRIGTIME": 0
+  },
+  "MTR_Y": {
+    "MTR_Y_PULSE": 1200,
+    "MTR_Y_SPEED": 700,
+    "MTR_Y_TRIGTIME": 0
+  },
+  "MTR_Z": {
+    "MTR_Z_PULSE": 5000,
+    "MTR_Z_SPEED": 1000,
+    "MTR_Z_TRIGTIME": 0
+  }
+}

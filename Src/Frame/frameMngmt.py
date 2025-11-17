@@ -176,18 +176,30 @@ class FrameMngmt():
     #--------------------------
     # send_signal_msg
     #--------------------------
-    def send_signal_msg(self, f_sym_name:str, f_sigvalue:Dict[str,int], f_mux_idx = 0)->None:
+    def send_signal_msg(self, f_sigvalue:Dict[str,int], f_sym_name:str= "" , f_mux_idx = 0)->None:
 
         """
         Encode et envoie un message en fonction des signaux
+
+        param:
+            f_sigvalue dictionnary with key : signal_name value, value to encode
+            f_sym_name : the symbol name, if you know it pull it, and if you don't we will try to 
+                            found it with the key from f_sigvalue
+            f_mux_idx : index multiplexor, not use right now
         """
         # Trouver le symbole
+        if f_sym_name == "" :
+            for sym, sym_info in self.symbol.items():
+                if set(f_sigvalue.keys()) == set(sym_info['signals']['0'].keys()):
+                    f_sym_name = sym
+                    break
+
         if f_sym_name not in self.symbol:
             print(f"[ERROR] : Symbole {f_sym_name} inconnu")
             return
 
         symbol = self.symbol[f_sym_name]
-        msg_id = int(str(symbol['msg_id']), 16)
+        msg_id = int(str(symbol['msg_id']))
         print(msg_id)
         signals = symbol['signals']['0']  # pas de mux pour l'instant
 
@@ -409,7 +421,7 @@ class FrameMngmt():
         # Recherche du symbole correspondant à msg_id
         symbol = None
         for sym_name, sym in self.symbol.items():
-            if sym['msg_id'] == int(msg_id):
+            if sym['msg_id'] == int(msg_id, 16):
                 symbol = sym
                 break
 
@@ -738,7 +750,7 @@ class FrameMngmt():
                                 self.list_id[current_type].append(current_id)
 
                             if current_symbol:
-                                self.symbol[current_symbol]['msg_id'] = int(current_id)
+                                self.symbol[current_symbol]['msg_id'] = int(current_id,16)
                                 self.symbol[current_symbol]['msg_type'] = current_type
                             continue
 

@@ -1,0 +1,12 @@
+[
+  {
+    "title": "CL42T_MTR_1_STATE",
+    "signals": [
+      "CL42T_MTR_1_STATE",
+      "CL42T_MTR_2_STATE",
+      "CL42T_MTR_3_STATE",
+      "CL42T_MTR_4_STATE"
+    ],
+    "paused": true
+  }
+]

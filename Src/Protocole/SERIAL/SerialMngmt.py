@@ -10,11 +10,12 @@
 #------------------------------------------------------------------------------
 #                                       IMPORT
 #------------------------------------------------------------------------------
-import time
+import time, os
 from queue import Queue, Empty
 import serial
 from typing import Optional
 import threading
+from Library.ModuleLog import MngLogFile, log
 from enum import IntEnum
 
 #------------------------------------------------------------------------------
@@ -36,7 +37,7 @@ from queue import Queue, Empty
 import serial, threading, time
 from typing import Optional
 
-SRL_TIMEOUT = 5.0  # exemple: 5 secondes
+SRL_TIMEOUT = 5_000_000_000  # exemple: 5 secondes
 START_BYTES = b"\xAA\x55"  # exemple à adapter
 
 
@@ -44,21 +45,28 @@ class SerialMngmt():
     def __init__(self, f_baudrate:int, 
                  f_port_com:str,
                  f_enable_log:bool = False, 
-                 f_dirlog:bool = "",
+                 f_dirlog:str = "",
                  f_srl_err_cb = None):
 
         self._baudrate = f_baudrate
         self._port_com:str = f_port_com
-        self._serial: Optional[serial.Serial] = None
+        self._serial: Optional[serial.Serial]
         self._frame_size : int = 0
         self._receive_queue: Queue = Queue()  # contiendra (frame, timestamp)
         self._rx_thread: Optional[threading.Thread] = None
         self._stop_thread = threading.Event()
         self._buffer = bytearray()
         self.error_callback = f_srl_err_cb
+        self._enable_log = f_enable_log
         self._last_received_time = 0
+        self._start_time = 0
 
+        if self._enable_log:
+            if not os.path.isdir(f_dirlog):
+                raise NotADirectoryError(f"{f_dirlog} is not a directory")
 
+            self.make_log = MngLogFile(f_dirlog, "SerialLogging.log",\
+                                                log.DEBUG, "Serial logging")  
     #--------------------------
     # open_serial_line
     #--------------------------
@@ -125,15 +133,29 @@ class SerialMngmt():
     # __perform_cyclic
     #--------------------------
     def __perform_cyclic(self):
-        self._last_received_time = time.time()
+        self._last_received_time = time.time_ns()
+        buffer_log:str = ""
+        cnt_buff_log:int = 0
+        self._start_time = time.time_ns()
+
         while not self._stop_thread.is_set():
             try:
                 if self._serial.in_waiting:
                     data = self._serial.read(self._serial.in_waiting)
                     if data:
-                        self._last_received_time = time.time()
+                        self._last_received_time = time.time_ns()
                         self._buffer.extend(data)
-                        self._extract_frames()
+                        buffer_log += self._extract_frames()
+                         
+                        if self._enable_log:
+                            cnt_buff_log += 1
+                            if cnt_buff_log > 3000:
+                                self.make_log.LCF_SetMsgLog(log.INFO, buffer_log)
+                                cnt_buff_log = 0
+                                buffer_log = ""
+                        else: 
+                            buffer_log = ""
+
             except serial.SerialException as e:
                 print(f"[ERROR] Serial port error: {e}")
                 self.__try_serial_reco()
@@ -141,11 +163,11 @@ class SerialMngmt():
                 print(f"[ERROR] Unexpected error: {e}")
                 self._stop_thread.set()
 
-            if time.time() - self._last_received_time > SRL_TIMEOUT:
+            if time.time_ns() - self._last_received_time > SRL_TIMEOUT:
                 print("[WARNING] No data received for 5 seconds.")
                 if self.error_callback:
                     self.error_callback(SerialError.SerialErrorTimeout)
-                self._last_received_time = time.time()
+                self._last_received_time = time.time_ns()
 
             time.sleep(0.01)
 
@@ -163,22 +185,29 @@ class SerialMngmt():
     #--------------------------
     # _extract_frames
     #--------------------------
-    def _extract_frames(self):
+    def _extract_frames(self) ->str:
+
+        retval_buffer = ""
         while len(self._buffer) >= self._frame_size:
             start_index = self._find_start_bytes()
             if start_index == -1:
                 self._buffer.clear()
-                return
+                break
             elif start_index > 0:
                 del self._buffer[:start_index]
 
             if len(self._buffer) >= self._frame_size:
                 frame = self._buffer[:self._frame_size]
                 ts = time.time_ns()  # timestamp en nanoseconde
+                retval_buffer = str((ts - self._start_time) / 1e6) + ' '
+                retval_buffer += frame.hex()
+                retval_buffer += "\n"
                 self._receive_queue.put((bytes(frame), ts))
                 del self._buffer[:self._frame_size]
             else:
                 break
+        return retval_buffer
+
     #--------------------------
     # stop
     #--------------------------
