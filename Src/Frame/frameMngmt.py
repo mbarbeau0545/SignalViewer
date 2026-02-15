@@ -20,8 +20,8 @@ from queue import Queue, Empty
 
 
 import importlib
-from Protocole.CAN.Mngmt.CanMngmt import get_can_interface, DriverCanUsed
-from Protocole.CAN.Mngmt.AbstractCAN import StructCANMsg, CanMngmtError
+from Protocole.CAN.Mngmt.CanMngmt import get_can_interface, DriverCanUsed,CANInterface
+from Protocole.CAN.Mngmt.AbstractCAN import StructCANMsg, CanMngmtError, MsgType
 from Protocole.SERIAL.SerialMngmt import SerialMngmt, SerialError, START_BYTES
 from Library.ModuleLog import MngLogFile, log
 
@@ -30,15 +30,17 @@ from Library.ModuleLog import MngLogFile, log
 #------------------------------------------------------------------------------
 SYM_PATTERN_ENUM = r'(\d+)="([^"]+)"'
 PATTERN_SIGNAL = re.compile(
-    r"Sig=(\w+)\s+unsigned\s+(\d+)"                  # nom et len
-    r"(?:\s+(-m))?"                                  # encodage
-    r"(?:\s+/f:(\d+))?"                              # factor
-    r"(?:\s+/o:(\d+))?"                              # offset
-    r"(?:\s+/max:(\d+))?"                            # max (non utilisé ici mais capturé)
-    r"(?:\s+/e:(\w+))?"                              # enum
+    r"Sig=(\w+)\s+(\w+)\s+(\d+)"                         # nom, type, longueur
+    r"(?:\s+(-m))?"                                      # encodage
+    r"(?:\s+/f:([+-]?(?:\d+(?:\.\d*)?|\.\d+)))?"         # factor
+    r"(?:\s+/o:([+-]?(?:\d+(?:\.\d*)?|\.\d+)))?"         # offset
+    r"(?:\s+/max:(\d+))?"                                # max
+    r"(?:\s+/e:(\w+))?"                                  # enum
 )
 
-SYM_PATTERN_ID = re.compile(r'ID=([0-9A-Fa-f]+)h\s*//\s*(\w+)')
+PATTERN_SYM_ID = re.compile(
+    r'ID=([0-9A-Fa-f]+)h\s*//\s*(\w+)\s*(.*)'
+)
 SYM_PATTERN_LEN = re.compile(r'Len=(\d+)')
 SYM_PATTERN_SIG = re.compile(r'Sig=(\w+)\s+(\d+)')
 
@@ -67,6 +69,8 @@ class FrameMngmt():
     def __init__(self, f_prjcfg_file:str):
         self.prj_cfg_data = {}
         candriver:DriverCanUsed = DriverCanUsed.DrvPeak
+        self._serial_istc:Optional[SerialMngmt] = None
+        self._can_istc:Optional[CANInterface] = None
 
         if not os.path.isfile(f_prjcfg_file):
             raise FileNotFoundError(f'Signal Config file doest not exits {f_prjcfg_file}')
@@ -94,24 +98,13 @@ class FrameMngmt():
                 gate:str = self.prj_cfg_data["can_cfg"]["gate"]
                 if gate.upper() == "PEAK":
                     candriver = DriverCanUsed.DrvPeak
+                elif gate.upper() == "WAVESHARE":
+                    candriver = DriverCanUsed.DrvWaveShare
                 else:
                     raise ValueError(f'{gate} gate for CAN not allowed PEAK allowed')
 
         except (KeyError, TypeError, AttributeError) as e:
-            raise Exception(f'An error occured while extracting config project -> {e}')
-        
-        # also get the offset master stuff ^^ 
-        # serial managment #
-        self._serial_istc = SerialMngmt(srl_baudrate, 
-                                        srl_protcom, 
-                                        f_enable_log=self._enable_srl_log,
-                                        f_dirlog=self.prj_cfg_data["serial_cfg"]["srl_log_path"],
-                                        f_srl_err_cb=self.__error_serial_cb)
-        self._can_istc = get_can_interface( candriver,
-                                            f_canlogging=self._enable_can_log,
-                                            f_dirlog_path= self.prj_cfg_data["can_cfg"]["can_log_path"],
-                                            f_error_cb= self.__error_can_cb)
-        
+            raise Exception(f'An error occured while extracting config project -> {e}')       
 
         # signals maangment
         self.enum:Dict[str, List[List[int]]] = {}
@@ -124,12 +117,25 @@ class FrameMngmt():
             'SRL' : [],
             'CAN' : []
         }
-        if self._is_can_enable and self._enable_cansig_log:
+
+        if self._is_can_enable:
+            self._can_istc = get_can_interface( candriver,
+                                            f_canlogging=self._enable_can_log,
+                                            f_dirlog_path= self.prj_cfg_data["can_cfg"]["can_log_path"],
+                                            f_error_cb= self.__error_can_cb)
+        if self._enable_cansig_log:
             self.sigcan_log = MngLogFile( self.prj_cfg_data["can_cfg"]["sig_log_path"],
                                         "CanSigLogging.log",\
                                         log.DEBUG, "Signal logging")
             
-        if self._is_serial_enable and self._enable_srlsig_log:
+        if self._is_serial_enable:
+            self._serial_istc = SerialMngmt(srl_baudrate, 
+                                        srl_protcom, 
+                                        f_enable_log=self._enable_srl_log,
+                                        f_dirlog=self.prj_cfg_data["serial_cfg"]["srl_log_path"],
+                                        f_srl_err_cb=self.__error_serial_cb)
+            
+        if self._enable_srlsig_log:
             self.srlcan_log = MngLogFile( self.prj_cfg_data["serial_cfg"]["sig_log_path"],
                                         "SerialSigLogging.log",\
                                         log.DEBUG, "Signal logging")
@@ -194,13 +200,13 @@ class FrameMngmt():
                     f_sym_name = sym
                     break
 
-        if f_sym_name not in self.symbol:
+        if f_sym_name not in self.symbol or f_sym_name == "":
             print(f"[ERROR] : Symbole {f_sym_name} inconnu")
             return
 
         symbol = self.symbol[f_sym_name]
         msg_id = int(str(symbol['msg_id']))
-        print(msg_id)
+
         signals = symbol['signals']['0']  # pas de mux pour l'instant
 
         # Payload vide (par ex. 8 octets)
@@ -235,14 +241,23 @@ class FrameMngmt():
             self.sig_value[signal_name].put([raw_value, eng_value, time.time_ns()])
             self.__insert_bits(payload, raw_value, start_bit, length, encoding)
 
-        frame = bytearray()
-        frame.append(START_BYTES[0])
-        frame.append(START_BYTES[1])
-        frame.append(msg_id)
-        frame.extend(payload)
+        
+        if self._is_can_enable and self._can_istc is not None:
+            can_struct = StructCANMsg(
+                msg_id, 
+                length=len(payload),
+                msgType=MsgType.CAN_MNGMT_MSG_EXTENDED,
+                data=list(payload)
+            )
+            self._can_istc.send(can_struct)
+            print(f'[INFO] : Send threw can bus {payload.hex()}')
+        elif self._is_serial_enable and self._serial_istc is not None:
+                self._serial_istc.send_serial(msg_id, payload)
+                print(f'[INFO] : Send threw serial bus {payload.hex()}')
+        else:
+            print("[ERROR] No Serial or CAN Interface ready")
 
-        self._serial_istc.send_serial(frame)
-        print(f'[INFO] Serial send {frame.hex()}')
+        
 
 
     #--------------------------
@@ -313,7 +328,7 @@ class FrameMngmt():
             self._srl_frame_thread.start()
 
         if self._is_can_enable:
-            self._can_istc.connect(pcan_usb = self.prj_cfg_data["can_cfg"]["usb_bus"], pcan_baudrate= self.prj_cfg_data["can_cfg"]["baudrate"]) 
+            self._can_istc.connect(device_port = self.prj_cfg_data["can_cfg"]["device_port"], can_speed_bps= self.prj_cfg_data["can_cfg"]["can_speed_bps"]) 
             self._can_istc.flush()
             self._can_istc.receive_queue_start()
             self._stop_can_thread.clear()
@@ -700,15 +715,16 @@ class FrameMngmt():
                         match = PATTERN_SIGNAL.match(line)
                         if match:
                             nom_signal    = match.group(1)
-                            len_sig      = int(match.group(2))
-                            encoding_flag = match.group(3)
-                            factor        = int(match.group(4)) if match.group(4) else 1
-                            offset        = int(match.group(5)) if match.group(5) else 0
+                            len_sig      = int(match.group(3))
+                            encoding_flag = match.group(4)
+                            factor        = float(match.group(5)) if match.group(5) else 1
+                            offset        = int(match.group(6)) if match.group(6) else 0
                             # match.group(6) = max (non utilisé ici)
-                            enum_name     = match.group(7) if match.group(7) else None
+                            enum_name     = match.group(8) if match.group(8) else None
 
                             encoding = "MOTOROLA" if encoding_flag else "INTEL"
                             self.sig_value[nom_signal] = Queue()
+
                             self.signals[nom_signal] = {
                                 'length': len_sig,
                                 'encoding': encoding,
@@ -736,7 +752,7 @@ class FrameMngmt():
                             waiting_for_timeout = True
                             continue
 
-                        match_id = SYM_PATTERN_ID.match(line)
+                        match_id = PATTERN_SYM_ID.match(line)
                         if match_id:
                             current_id = match_id.group(1)
                             current_type = match_id.group(2)
@@ -752,6 +768,18 @@ class FrameMngmt():
                             if current_symbol:
                                 self.symbol[current_symbol]['msg_id'] = int(current_id,16)
                                 self.symbol[current_symbol]['msg_type'] = current_type
+                                # multi ecu managment 
+                                if match_id.group(3) != "":
+                                    multi_msg_dir = []
+                                    for dir_cfg in str(match_id.group(3)).replace(" ", "").split(","):
+                                        dir_value = str(dir_cfg.split(":")[1])
+                                        if dir_value not in ["RECEIVE", "SEND", "SENDRECEIVE", "UNUSED"]:
+                                            raise Exception(f'{dir_value} is unknwon expect ["RECEIVE", "SEND", "SENDRECEIVE"]')
+
+                                        multi_msg_dir.append(dir_value)
+
+                                    # on réecrit la valeur de la direction
+                                    self.symbol[current_symbol]['msg_direction'] = multi_msg_dir
                             continue
 
                         match_len = SYM_PATTERN_LEN.match(line)
@@ -817,14 +845,14 @@ class FrameMngmt():
 
                             continue
 
-            if current_symbol:
-                sym = self.symbol[current_symbol]
-                if sym['msg_direction'] == 'RECEIVE' or sym['msg_direction'] == 'SENDRECEIVE':
-                    if sym['timeout'] is None:
-                        raise ValueError(f"Missing Timeout for last symbol '{current_symbol}'")
-                if sym['msg_direction'] == 'SEND' or sym['msg_direction'] == 'SENDRECEIVE':
-                    if sym['cycle_time'] is None:
-                        raise ValueError(f"Missing CycleTime for last symbol '{current_symbol}'")
+            # if current_symbol:
+            #     sym = self.symbol[current_symbol]
+            #     if sym['msg_direction'] == 'RECEIVE' or sym['msg_direction'] == 'SENDRECEIVE':
+            #         if sym['timeout'] is None:
+            #             raise ValueError(f"Missing Timeout for last symbol '{current_symbol}'")
+            #     if sym['msg_direction'] == 'SEND' or sym['msg_direction'] == 'SENDRECEIVE':
+            #         if sym['cycle_time'] is None:
+            #             raise ValueError(f"Missing CycleTime for last symbol '{current_symbol}'")
     
     #--------------------------
     # __database_can_reader

@@ -30,6 +30,7 @@ from Library.ModuleLog import MngLogFile, log
 from .AbstractCAN import CANInterface
 from .PeakCanMngmt import PeakCanMngmt, PeakCanConfig
 from .VirtCanMngmt import VirtCanMngmt, VirtCanConfig
+from .WaveShareCanMngmt import WaveshareCanMngmt, WaveShareCanConfig
 #-------------------------------------------------------------------
 #                     Constants
 #-------------------------------------------------------------------
@@ -55,6 +56,7 @@ from .VirtCanMngmt import VirtCanMngmt, VirtCanConfig
 class DriverCanUsed(IntEnum):
     DrvPeak = 0
     DrvLibrary32bit = 1
+    DrvWaveShare = 2
 
 #------------------------
 # get_can_interface
@@ -80,7 +82,9 @@ def get_can_interface(  f_can_drv_used:DriverCanUsed,
         case DriverCanUsed.DrvPeak:
             return None
         case DriverCanUsed.DrvLibrary32bit:
-            return VirtCanMngmt(**arg_kwargs)       
+            return VirtCanMngmt(**arg_kwargs)
+        case DriverCanUsed.DrvWaveShare:
+            return WaveshareCanMngmt(**arg_kwargs)
 
 
 

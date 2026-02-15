@@ -77,7 +77,7 @@ class CanMngmtError(IntEnum):
 @dataclass
 class StructCANMsg:
     id: int = 0
-    msgType: MsgType = MsgType.CAN_MNGMT_MSG_STANDARD
+    msgType: MsgType = MsgType.CAN_MNGMT_MSG_EXTENDED
     length: int = 0
     data: List[int] = field(default_factory=list)
     timestamp:int = 0

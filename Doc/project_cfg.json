@@ -1,27 +1,33 @@
 {
-    "signal_cfg" : "D:/Project/Software/STM32/Gamma_fMotionPlanner/Doc/ConfigPrj/MessagingCfg/PrjMsgDefinition.sym",
-    "excel_cfg" : "D:/Project/Software/STM32/Gamma_fMotionPlanner/Doc/ConfigPrj/ExcelCfg/Project_SoftwareCfg.xlsm",
+    "signal_cfg" : "D:/Project/Software/STM32/Gamma/Gamma_Safety_AddCfg/Doc/ConfigPrj/GammaCfg/FirmwareOpeCfg/MessagingCfg/OpePrjMsgDefinition.sym",
+    "excel_cfg" : "D:/Project/Software/STM32/Gamma/Gamma_Safety_AddCfg/Doc/ConfigPrj/GammaCfg/FirmwareOpeCfg/Ope_Project_SoftwareCfg.xlsm",
     "serial_cfg" : {
         "port_com" : "COM3",
         "baudrate" : "115200",
-        "is_enable" : true,
+        "is_enable" : false,
         "frame_len" : 11,
         "enable_srl_msg_logg" : true,
         "enable_sig_logg" : true,
         "srl_log_path" : "Doc/Log",
         "sig_log_path" : "Doc/Log"
     },
-    "can_cfg" : {
-        "baudrate" : "PCAN_BAUD_250K",
-        "usb_bus" : "PCAN_USBBUS2",
-        "is_enable" : false,
-        "enable_can_msg_logg" : false,
-        "enable_sig_logg" : false,
-        "id_to_ignore" : [],
-        "gate" : "Peak",
-        "srl_log_path" : "Doc/Log",
-        "can_log_path" : "Doc/Log"
-
+    "can_cfg": {
+        "device_port": {
+            "vid" : "1A86",
+            "pid" : "7523",
+            "must_contain" : "CH340"
+        },
+        "can_speed_bps": 250000,
+        "baudrate": 2000000,
+        "mode": "NORMAL",
+        "frame": "EXTENDED",
+        "is_enable": true,
+        "enable_can_msg_logg": false,
+        "enable_sig_logg": false,
+        "id_to_ignore": [],
+        "gate": "WaveShare",
+        "can_log_path": "Doc/Log",
+        "sig_log_path" : "Doc/Log"
     }
     
 

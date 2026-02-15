@@ -84,9 +84,14 @@ class SerialMngmt():
     #--------------------------
     # send_serial
     #--------------------------
-    def send_serial(self, f_frame:bytearray)-> None:
+    def send_serial(self, msg_id:int, payload:bytearray)-> None:
         if self._serial and self._serial.is_open:
-            self._serial.write(f_frame)
+            frame = bytearray()
+            frame.append(START_BYTES[0])
+            frame.append(START_BYTES[1])
+            frame.append(msg_id)
+            frame.extend(payload)
+            self._serial.write(frame)
         else:
             raise RuntimeError("Serial port not configured or not open")
 
