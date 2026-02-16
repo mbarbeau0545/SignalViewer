@@ -1,6 +1,6 @@
 {
-    "signal_cfg" : "D:/Project/Software/STM32/Gamma/Gamma_Safety_AddCfg/Doc/ConfigPrj/GammaCfg/FirmwareOpeCfg/MessagingCfg/OpePrjMsgDefinition.sym",
-    "excel_cfg" : "D:/Project/Software/STM32/Gamma/Gamma_Safety_AddCfg/Doc/ConfigPrj/GammaCfg/FirmwareOpeCfg/Ope_Project_SoftwareCfg.xlsm",
+    "signal_cfg" : "D:/Project/Software/STM32/Gamma/Gamma_Firmware_AddHwCfg/Doc/ConfigPrj/GammaCfg/FirmwareOpeCfg/MessagingCfg/OpePrjMsgDefinition.sym",
+    "excel_cfg" : "D:/Project/Software/STM32/Gamma/Gamma_Firmware_AddHwCfg/Doc/ConfigPrj/GammaCfg/FirmwareOpeCfg/Ope_Project_SoftwareCfg.xlsm",
     "serial_cfg" : {
         "port_com" : "COM3",
         "baudrate" : "115200",

@@ -1,11 +1,20 @@
 {
-  "MTR_XL": {},
+  "MTR_XL": {
+    "MTR_XL_PLS": 14000,
+    "MTR_XL_SPD": 40000,
+    "MTR_XL_TRG": 0
+  },
   "MTR_XR": {},
   "MTR_Y": {},
   "MTR_Z": {},
   "MTR_WHL_AV_L": {},
   "MTR_WHL_AV_R": {},
-  "MTR_HD_KNF": {},
-  "MTR_HD_CNTR_KNF": {},
+  "MTR_HD_KNF": {
+    "MTR_HD_KNF_SPD": -57000,
+    "MTR_HD_KNF_TRG": 2000
+  },
+  "MTR_HD_CNTR_KNF": {
+    "MTR_HD_CNTR_KNF_PLS": 0
+  },
   "MTR_HD_HOLD": {}
 }

@@ -186,10 +186,11 @@ class WaveshareCanMngmt(CANInterface):
         frame[4] = 0x01  # Data frame (not RTR)
 
         can_id = int(f_frame.id) & 0x1FFFFFFF
-        frame[5] = (can_id >> 24) & 0xFF
-        frame[6] = (can_id >> 16) & 0xFF
-        frame[7] = (can_id >> 8) & 0xFF
-        frame[8] = can_id & 0xFF
+
+        frame[5] =  can_id        & 0xFF
+        frame[6] = (can_id >> 8)  & 0xFF
+        frame[7] = (can_id >> 16) & 0xFF
+        frame[8] = (can_id >> 24) & 0xFF
 
         dlc = int(f_frame.length) & 0x0F
         if dlc > self._MC_DLC_8:
@@ -359,37 +360,85 @@ class WaveshareCanMngmt(CANInterface):
         return frame
 
     def _parse_fixed_20b_frame(self, frame: bytearray) -> StructCANMsg:
+        """
+        Parse Waveshare USB-CAN-A frames.
+        Supports:
+            - Variable length:  AA | Type | ID(2/4 LE) | Data(0..8) | 55
+            - Fixed 20 bytes:   AA 55 | TYPE | FrameType | FrameFormat | ID(4 LE) | DLC | D0..D7 | 00 | checksum
+        """
         msg = StructCANMsg()
 
-        if frame is None or len(frame) < self._FIXED_FRAME_LEN:
+        if frame is None or len(frame) < 4:
+            return msg
+
+        # ---------- Variable-length protocol ----------
+        # AA | type | ... | 55
+        if frame[0] == 0xAA and frame[-1] == 0x55 and not (len(frame) >= self._FIXED_FRAME_LEN and frame[1] == 0x55):
+            ftype = frame[1]
+            is_ext = (ftype & 0x20) != 0
+            # is_rtr = (ftype & 0x10) != 0  # dispo si vous voulez le gérer
+            dlc = int(ftype & 0x0F)
+            if dlc > self._MC_DLC_8:
+                dlc = self._MC_DLC_8
+
+            if is_ext:
+                id_len = 4
+                id_mask = 0x1FFFFFFF
+            else:
+                id_len = 2
+                id_mask = 0x7FF
+
+            min_len = 1 + 1 + id_len + dlc + 1
+            if len(frame) < min_len:
+                return msg
+
+            idx_id = 2
+            idx_data = idx_id + id_len
+
+            # ID little-endian
+            can_id = 0
+            for i in range(id_len):
+                can_id |= int(frame[idx_id + i]) << (8 * i)
+            can_id &= id_mask
+
+            data = [int(frame[idx_data + i]) & 0xFF for i in range(dlc)]
+
+            msg_type = MsgType.CAN_MNGMT_MSG_EXTENDED if is_ext else MsgType.CAN_MNGMT_MSG_STANDARD
+            msg = StructCANMsg(can_id, msg_type, dlc, data, int(time.time() * 1000))
+            return msg
+
+        # ---------- Fixed 20-byte protocol ----------
+        if len(frame) < self._FIXED_FRAME_LEN:
             return msg
 
         if frame[0] != 0xAA or frame[1] != 0x55:
             return msg
 
-        # Verify checksum if possible
         checksum = frame[19]
         expected = self.handle.generate_checksum(frame[2:19])
         if checksum != expected:
             return msg
 
-        frame_type = frame[3]
+        frame_type = frame[3]  # 0x01 std, 0x02 ext
+
+        # ID little-endian (cf. exemples Waveshare)
         can_id = (
-            (frame[5] << 24) |
-            (frame[6] << 16) |
-            (frame[7] << 8) |
-            frame[8]
+            (int(frame[5]) << 0) |
+            (int(frame[6]) << 8) |
+            (int(frame[7]) << 16) |
+            (int(frame[8]) << 24)
         )
 
         dlc = int(frame[9]) & 0x0F
         if dlc > self._MC_DLC_8:
             dlc = self._MC_DLC_8
 
-        data = [int(frame[10 + i]) & 0xFF for i in range(0, dlc)]
+        data = [int(frame[10 + i]) & 0xFF for i in range(dlc)]
 
-        msg_type = MsgType.CAN_MNGMT_MSG_STANDARD
-        if frame_type == 0x02:
-            msg_type = MsgType.CAN_MNGMT_MSG_EXTENDED
-
-        msg = StructCANMsg(can_id, msg_type, dlc, data, int(time.time() * 1000))
+        msg_type = MsgType.CAN_MNGMT_MSG_EXTENDED if frame_type == 0x02 else MsgType.CAN_MNGMT_MSG_STANDARD
+        msg = StructCANMsg(can_id & (0x1FFFFFFF if msg_type == MsgType.CAN_MNGMT_MSG_EXTENDED else 0x7FF),
+                        msg_type,
+                        dlc,
+                        data,
+                        int(time.time() * 1000))
         return msg

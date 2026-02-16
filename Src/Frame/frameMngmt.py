@@ -110,6 +110,7 @@ class FrameMngmt():
         self.enum:Dict[str, List[List[int]]] = {}
         self.signals:Dict[str, Dict] = {}
         self.sig_value:Dict[str, Queue] = {}
+        self.msg_sig_value:Dict[str, Queue] = {}
         self.symbol:Dict[str, Dict] = {}
         self.can_cnt_buff_log:int = 0
         self.srl_cnt_buff_log:int = 0
@@ -179,6 +180,32 @@ class FrameMngmt():
         
         return result
     
+    def get_msg_signal_value(self, f_msg_id:str, f_signal: str) -> List[int]:
+        """Get the Queue of values for a given signals.
+        Args:
+            f_msg_id (str): the id of the message suppsoively containing the signal.
+            f_signal (str): the name of the signals.
+        Returns:
+            List: a list of x element containing rawValue and ValueCompute [[1,4, timestamp], [5,20, timestamps]].
+        Raises:
+            KeyError: if the signals is not found.
+        """
+        result:List[int] = []
+        key_msg_sig = str(f_msg_id) + f_signal
+        sig_queue = self.msg_sig_value.get(key_msg_sig)
+        if sig_queue is None:
+            raise KeyError(f"{key_msg_sig} does not exist in Signal Configuration")
+        
+        # Vide la queue
+        try:
+            while True:
+                # get_nowait lève Empty si la queue est vide
+                item = sig_queue.get_nowait()
+                result.append(item)
+        except Empty:
+            pass
+        
+        return result
     #--------------------------
     # send_signal_msg
     #--------------------------
@@ -235,10 +262,15 @@ class FrameMngmt():
             raw_value = int((eng_value - offset) / factor)
 
             # update the value in container 
-            if signal_name not in self.sig_value:
+            if signal_name not in self.sig_value.keys():
                 self.sig_value[signal_name] = Queue()
+            msg_sig_name = str(msg_id) + signal_name
+            if msg_sig_name not in self.msg_sig_value.keys():
+                self.msg_sig_value[msg_sig_name] = Queue()
             
+            self.msg_sig_value[msg_sig_name].put([raw_value, eng_value, time.time_ns()])
             self.sig_value[signal_name].put([raw_value, eng_value, time.time_ns()])
+
             self.__insert_bits(payload, raw_value, start_bit, length, encoding)
 
         
@@ -472,9 +504,16 @@ class FrameMngmt():
                 value = raw_value * factor + offset
 
             # Stocker la valeur dans la queue associée
-            if signal_name not in self.sig_value:
+            if signal_name not in self.sig_value.keys():
                 self.sig_value[signal_name] = Queue()
+
+            msg_sig_name = str(msg_id) + signal_name
+            if msg_sig_name not in self.msg_sig_value.keys():
+                self.msg_sig_value[msg_sig_name] = Queue()
+            
+            self.msg_sig_value[msg_sig_name].put([raw_value, value, ts])
             self.sig_value[signal_name].put([raw_value, value, ts])
+
             buffer_log += f'{(ts - self._start_time) / 1e6} {signal_name} {raw_value} {value}\n'
 
         return buffer_log
@@ -544,13 +583,19 @@ class FrameMngmt():
                 value = raw_value * factor + offset
 
             # Stocker la valeur dans la queue associée
-            if signal_name not in self.sig_value:
+            if signal_name not in self.sig_value.keys():
                 self.sig_value[signal_name] = Queue()
 
-            self.sig_value[signal_name].put([raw_value, value, f_can_frame.timestamp])
-            bufffer_log += f'{f_can_frame.timestamp} {signal_name} {raw_value} {value}\n'
+            msg_sig_name = str(msg_id) + signal_name
+            if msg_sig_name not in self.msg_sig_value.keys():
+                self.msg_sig_value[msg_sig_name] = Queue()
 
-        return bufffer_log
+            self.msg_sig_value[msg_sig_name].put([raw_value, value, f_can_frame.timestamp])
+            self.sig_value[signal_name].put([raw_value, value, f_can_frame.timestamp])
+
+            buffer_log = f"{f_can_frame.timestamp} 0x{msg_id:X} {signal_name} {raw_value} {value}\n"
+
+        return buffer_log
     #--------------------------
     # __extract_bits
     #--------------------------

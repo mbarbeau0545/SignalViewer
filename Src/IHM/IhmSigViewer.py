@@ -26,9 +26,7 @@ from PyQt5.QtGui import QColor, QBrush, QFontMetrics
 
 import pyqtgraph as pg
 
-
 from IHM.IhmSigPlayer import SignalPlayerWidget
-
 from Frame.frameMngmt import FrameMngmt
 from Signal.ActSnsMngmt import ActInfo, SnsInfo
 from typing import List, Dict
@@ -89,6 +87,11 @@ class SignalViewer(QMainWindow):
         }
         self.previous_values = {signal_name: -1 for signal_name in self.signals_name}
 
+        
+
+        # msg-specific buffers (avoid collisions when same signal name exists in different CAN IDs)
+        self.msg_signals_values = {}   # key: "0xID:Signal" -> deque([raw, calc, ts])
+        self.msg_previous_values = {}  # key: (msg_id:int, signal_name:str) -> last raw string
         self.frame_isct.get_symbol_list()
 
         
@@ -149,6 +152,28 @@ class SignalViewer(QMainWindow):
         # try to restore saved graphs
         self._load_graphs_state()
 
+
+    #--------------------------
+    # _mk_sig_key
+    #--------------------------
+    def _mk_sig_key(self, f_msg_id: int, f_sig_name: str) -> str:
+        """Build a unique signal identifier for a given CAN msg id."""
+        try:
+            mid = int(f_msg_id)
+        except Exception:
+            mid = 0
+        return f"0x{mid:X}:{str(f_sig_name)}"
+
+    #--------------------------
+    # _get_plot_deque
+    #--------------------------
+    def _get_plot_deque(self, f_sig_id: str):
+        """Return the deque used to plot a signal (msg-specific if available)."""
+        if hasattr(self, "msg_signals_values") and f_sig_id in self.msg_signals_values:
+            return self.msg_signals_values[f_sig_id]
+        return self.signals_values.get(f_sig_id)
+
+
     # ------------------------- toolbar -------------------------
     def _create_toolbar(self):
         toolbar = self.addToolBar("Main Toolbar")
@@ -173,10 +198,6 @@ class SignalViewer(QMainWindow):
         btn_sig_player.clicked.connect(self.__open_signal_player)
         toolbar.addWidget(btn_sig_player)
 
-    #--------------------------
-    # kill_all_thread
-    #--------------------------
-    
     #--------------------------
     # __open_signal_player
     #--------------------------
@@ -203,10 +224,12 @@ class SignalViewer(QMainWindow):
             self.tab_widget.addTab(w, tab_name)
             self.tab_widget.setCurrentWidget(w)
 
-
+    #--------------------------
+    # kill_all_thread
+    #--------------------------
     def kill_all_thread(self):
-            """Kill all thread currently on going """
-            self.frame_isct.unperform_cyclic()
+        """Kill all thread currently on going """
+        self.frame_isct.unperform_cyclic()
 
     #--------------------------
     # __connect_ecu
@@ -226,71 +249,75 @@ class SignalViewer(QMainWindow):
     #--------------------------
     # __refresh_table
     #--------------------------
+
     def __refresh_table(self):
         curr_time = time.time()
         if not self.is_ecu_connected and (curr_time - self.last_try_con) > 5:
             self.__connect_ecu()
             return
 
-        # Update UI values and store values for plots
-        for row, signal_name in enumerate(self.signals_name):
-            sig_val = self.frame_isct.get_signal_value(signal_name)
-            if sig_val == [[]]:
+        # Iterate symbols/messages to keep signal context (msg_id + signal_name)
+        for sym_name, sym_info in self.frame_isct.symbol.items():
+            msg_id = sym_info.get('msg_id', None)
+            if msg_id is None:
                 continue
 
-            for sig_info in sig_val:
-                if sig_info:
-                    self.signals_values[signal_name].append(sig_info)
-
-            if not (sig_val and sig_val[-1]):
+            # Only mux index '0' is used in this UI refresh for now
+            sigs = sym_info.get('signals', {}).get('0', {})
+            if not isinstance(sigs, dict):
                 continue
 
-            raw_val = str(sig_val[-1][0])
-            calc_val = str(sig_val[-1][1])
-            prev_raw = self.previous_values.get(signal_name)
+            for signal_name in sigs.keys():
+                # Pull new samples for this (msg_id, signal)
+                try:
+                    sig_val = self.frame_isct.get_msg_signal_value(str(msg_id), str(signal_name))
+                except Exception:
+                    continue
 
-            # Decide which view is active
-            in_tree = hasattr(self, '_sig_items') and signal_name in getattr(self, '_sig_items', {})
+                if sig_val == [[]] or sig_val == []:
+                    continue
 
-            if in_tree:
-                child = self._sig_items[signal_name]
-                child.setText(1, raw_val)
-                child.setText(2, calc_val)
+                # Store for plots (msg-specific)
+                sig_id = self._mk_sig_key(msg_id, signal_name)
+                if sig_id not in self.msg_signals_values:
+                    self.msg_signals_values[sig_id] = deque(maxlen=PLOT_MAX_POINT)
 
-                # Highlight on change
-                if prev_raw is not None and prev_raw != raw_val:
-                    child.setBackground(1, QColor("yellow"))
-                    child.setBackground(2, QColor("yellow"))
-                else:
-                    child.setBackground(1, QColor("white"))
-                    child.setBackground(2, QColor("white"))
-            else:
-                # Legacy Signals table (if still used somewhere)
-                item_raw = QTableWidgetItem(raw_val)
-                item_calc = QTableWidgetItem(calc_val)
-                item_raw.setForeground(QBrush(QColor('black')))
-                item_calc.setForeground(QBrush(QColor('black')))
-                if hasattr(self, 'table'):
-                    self.table.setItem(row, 1, item_raw)
-                    self.table.setItem(row, 2, item_calc)
+                for sig_info in sig_val:
+                    if sig_info:
+                        self.msg_signals_values[sig_id].append(sig_info)
 
-                    if prev_raw is not None and prev_raw != raw_val:
-                        item_raw.setBackground(QColor("yellow"))
-                        item_calc.setBackground(QColor("yellow"))
+                if not (sig_val and sig_val[-1]):
+                    continue
+
+                raw_txt = "" if sig_val[-1][0] is None else str(sig_val[-1][0])
+                calc_txt = "" if sig_val[-1][1] is None else str(sig_val[-1][1])
+
+                msg_key = (int(msg_id), str(signal_name))
+                prev_raw = self.msg_previous_values.get(msg_key)
+
+                # Update message tree item
+                if hasattr(self, '_sig_items') and msg_key in getattr(self, '_sig_items', {}):
+                    child: QTreeWidgetItem = self._sig_items[msg_key]
+                    child.setData(2, Qt.DisplayRole, raw_txt)
+                    child.setData(1, Qt.DisplayRole, calc_txt)
+
+                    # Highlight on change
+                    if prev_raw is not None and prev_raw != raw_txt:
+                        brush = QBrush(QColor("yellow"))
                     else:
-                        item_raw.setBackground(QColor("white"))
-                        item_calc.setBackground(QColor("white"))
+                        brush = QBrush(QColor("white"))
+                    child.setBackground(1, brush)
+                    child.setBackground(2, brush)
 
-            self.previous_values[signal_name] = raw_val
+                self.msg_previous_values[msg_key] = raw_txt
 
-            # Update sensors widget values
-            if signal_name.upper().startswith("SNS"):
-                self._refresh_sensors_widget_value(signal_name, calc_val)
+                # Update sensors widget values (unique names)
+                if str(signal_name).upper().startswith("SNS"):
+                    self._refresh_sensors_values(str(signal_name), calc_txt)
 
-            # Update act widget values
-            if signal_name.upper().startswith("ACT"):
-                self._refresh_act_widget_value(signal_name, calc_val)
-
+                # Update act widget values (unique names)
+                if str(signal_name).upper().startswith("ACT"):
+                    self._refresh_actuators_get_values(str(signal_name), calc_txt)
 
     def __open_graph_tab(self, signal_name, saved_signals: List[str] = None):
         widget = QWidget()
@@ -342,8 +369,9 @@ class SignalViewer(QMainWindow):
             if widget._t0 is None:
                 min_t0 = None
                 for sig_name in widget._curves.keys():
-                    if self.signals_values[sig_name]:
-                        t0_candidate = self.signals_values[sig_name][0][2]
+                    dq = self._get_plot_deque(sig_name)
+                    if dq:
+                        t0_candidate = dq[0][2]
                         if min_t0 is None or t0_candidate < min_t0:
                             min_t0 = t0_candidate
                 widget._t0 = min_t0
@@ -352,17 +380,20 @@ class SignalViewer(QMainWindow):
 
             # mise à jour par signal
             for sig_name, sig_data in list(widget._curves.items()):
-                while self.signals_values[sig_name]:
-                    raw, calc, ts = self.signals_values[sig_name][0]
+                dq = self._get_plot_deque(sig_name)
+                if dq is None:
+                    continue
+                while dq:
+                    raw, calc, ts = dq[0]
                     if ts < widget._t0:
-                        self.signals_values[sig_name].popleft()
+                        dq.popleft()
                         continue
 
                     t_sec = (ts - widget._t0) / 1e9
                     if not sig_data["times"] or t_sec > sig_data["times"][-1]:
                         sig_data["times"].append(t_sec)
                         sig_data["values"].append(raw)
-                    self.signals_values[sig_name].popleft()
+                    dq.popleft()
 
                 # découpe et affichage
                 if len(sig_data["times"]) > PLOT_MAX_POINT:
@@ -433,7 +464,8 @@ class SignalViewer(QMainWindow):
         """Build the tree from symbols. Creates mapping signal->item for fast refresh."""
         self.msg_tree.clear()
         self._msg_items = {}      # sym_name -> QTreeWidgetItem
-        self._sig_items = {}      # signal_name -> QTreeWidgetItem
+        self._sig_items = {}      # (msg_id:int, signal_name:str) -> QTreeWidgetItem
+        self._plot_signal_ids = []  # list of unique signal identifiers for plotting
 
         sym_list = []
         try:
@@ -473,10 +505,13 @@ class SignalViewer(QMainWindow):
                         top.addChild(child)
 
                         btn = QPushButton("Graph")
-                        btn.clicked.connect(lambda _, s=str(sig_name): self.__open_graph_tab(s))
+                        sig_id = self._mk_sig_key(msg_id if msg_id is not None else 0, str(sig_name))
+                        self._plot_signal_ids.append(sig_id)
+                        btn.clicked.connect(lambda _, s=sig_id: self.__open_graph_tab(s))
                         self.msg_tree.setItemWidget(child, 3, btn)
 
-                        self._sig_items[str(sig_name)] = child
+                        msg_key = (int(msg_id) if msg_id is not None else 0, str(sig_name))
+                        self._sig_items[msg_key] = child
 
             top.setExpanded(False)
 
@@ -649,7 +684,8 @@ class SignalViewer(QMainWindow):
                 submenu_remove.addAction(action)
 
         # Signaux disponibles à ajouter
-        available = [s for s in self.signals_name if s not in widget._curves]
+        src = getattr(self, '_plot_signal_ids', self.signals_name)
+        available = [s for s in src if s not in widget._curves]
         if available:
             submenu_add = menu.addMenu("Ajouter un signal")
             for sig_name in available:
@@ -1076,7 +1112,7 @@ class SignalViewer(QMainWindow):
         try:
             self.kill_all_thread()
         except Exception:
-            pass
+            pass    
         super().closeEvent(event)
 
 

@@ -1,370 +1,397 @@
-"""
+#------------------------------------------------------------------------------
 #  @file        IhmSigPlayer.py
-#  @brief       Signal Player - replay .log files produced by FrameMngmt.
-#
-#  Expected log line (robust parsing):
-#      <time> <signal_name> <raw_value> <value>
-#  where <value> can be numeric or an enum string (possibly with spaces).
-"""
+#  @brief       Signal Player widget for replaying .log files
+#------------------------------------------------------------------------------
+from __future__ import annotations
+
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
-    QFileDialog, QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox,
-    QComboBox, QSpinBox
-)
 from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QBrush, QColor
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
+    QLineEdit, QListWidget, QListWidgetItem, QCheckBox, QComboBox, QGroupBox,
+    QFormLayout, QMessageBox
+)
 
 import pyqtgraph as pg
 
 
 @dataclass
-class LogEvent:
-    t_sec: float
-    sig: str
+class LogPoint:
+    t_s: float
     raw: float
     val: float
-    val_is_raw_fallback: bool
+
+
+class _LogParser:
+    """
+    Supports both formats:
+        - legacy:  <t> <signal> <raw> <value>
+        - msg-aware: <t> <msg_id> <signal> <raw> <value>
+    Where:
+        - <t> can be in seconds or milliseconds; we keep it as float then normalize on playback.
+        - <msg_id> can be 0x18FF0000, 18FF0000h, 18FF0000, 010, etc.
+        - <value> can be numeric or enum string. If enum -> we fallback to raw for plotting.
+    """
+
+    _re_split = re.compile(r"\s+")
+    _re_hex = re.compile(r"^(?:0x)?([0-9A-Fa-f]+)(?:h)?$")
+
+    @staticmethod
+    def _parse_float(token: str) -> Optional[float]:
+        val = None
+        try:
+            val = float(token)
+        except Exception:
+            val = None
+        return val
+
+    @classmethod
+    def _norm_msg_id(cls, token: str) -> Optional[str]:
+        token = token.strip()
+        m = cls._re_hex.match(token)
+        if not m:
+            return None
+        hex_str = m.group(1).upper()
+        # normalize width loosely: keep as 0x... uppercase, no leading zeros trimming beyond one char
+        msg = f"0x{hex_str.lstrip('0') or '0'}"
+        return msg
+
+    @staticmethod
+    def _plot_y(raw_s: str, val_s: str) -> Tuple[Optional[float], Optional[float]]:
+        raw = _LogParser._parse_float(raw_s)
+        val = _LogParser._parse_float(val_s)
+        return raw, val
+
+    @classmethod
+    def parse_file(cls, path: str) -> Tuple[Dict[str, List[LogPoint]], List[str]]:
+        """
+        Returns:
+            data_by_series: series_name -> list of LogPoint (sorted by t_s)
+            series_list: list of series names (stable sorted)
+        """
+        data_by_series: Dict[str, List[LogPoint]] = {}
+        series_list: List[str] = []
+
+        if not os.path.isfile(path):
+            return data_by_series, series_list
+
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+
+                parts = cls._re_split.split(line)
+                # Must at least have t + sig + raw + val
+                if len(parts) < 4:
+                    continue
+
+                t = cls._parse_float(parts[0])
+                if t is None:
+                    continue
+
+                idx = 1
+                msg_id = None
+
+                # Try msg-aware: second token looks like hex id
+                if len(parts) >= 5:
+                    msg_try = cls._norm_msg_id(parts[1])
+                    if msg_try is not None:
+                        msg_id = msg_try
+                        idx = 2
+
+                # Now expect signal, raw, value (value could be multi-token; we take first token as numeric candidate)
+                if idx + 2 >= len(parts):
+                    continue
+
+                sig = parts[idx]
+                raw_s = parts[idx + 1]
+                # value may contain spaces (enum), keep full tail for display, but for plotting we only use first numeric token
+                val_s = parts[idx + 2]
+                raw_f, val_f = cls._plot_y(raw_s, val_s)
+
+                # if value isn't numeric, fallback to raw for plotting
+                if raw_f is None:
+                    continue
+                if val_f is None:
+                    val_f = raw_f
+
+                if msg_id is not None:
+                    series = f"{msg_id}:{sig}"
+                else:
+                    series = sig
+
+                if series not in data_by_series:
+                    data_by_series[series] = []
+                    series_list.append(series)
+
+                data_by_series[series].append(LogPoint(t_s=float(t), raw=float(raw_f), val=float(val_f)))
+
+        # Sort and normalize time base per series (convert to seconds relative to t0)
+        for series, pts in data_by_series.items():
+            pts.sort(key=lambda p: p.t_s)
+            if pts:
+                t0 = pts[0].t_s
+                # Heuristic: if times look like milliseconds (big numbers but close), we keep as seconds by /1000 when span is huge
+                span = pts[-1].t_s - t0
+                # If span > 10_000 it's likely ms or us already, but can't know. We'll treat unit as "same",
+                # and only shift to start at 0.
+                for i in range(len(pts)):
+                    pts[i] = LogPoint(t_s=pts[i].t_s - t0, raw=pts[i].raw, val=pts[i].val)
+
+        series_list = sorted(series_list, key=lambda s: s.lower())
+        return data_by_series, series_list
 
 
 class SignalPlayerWidget(QWidget):
-    """
-    Widget that loads a .log file and replays selected signals on a plot.
-
-    - Multi-signal plot in a single window (legend).
-    - Loop playback.
-    - Speed factor.
-    - Robust parsing (tolerates prefixes before the 4 fields).
-    """
-    _RE_NUM = re.compile(r'^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$')
-
-    def __init__(self, parent=None):
+    def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
-        self._events: List[LogEvent] = []
-        self._sig_set: List[str] = []
-        self._selected: Dict[str, bool] = {}
+        self._log_path: Optional[str] = None
+        self._data: Dict[str, List[LogPoint]] = {}
+        self._series: List[str] = []
 
-        self._play_idx: int = 0
-        self._t0: Optional[float] = None
+        self._curves: Dict[str, pg.PlotDataItem] = {}
+        self._play_pos_s: float = 0.0
+        self._playing: bool = False
         self._loop: bool = True
         self._speed: float = 1.0
-        self._playing: bool = False
-
-        self._curves: Dict[str, Dict] = {}
-
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(50)
+        self._t_ref: Optional[float] = None
+        self._t_end_s: float = 0.0
 
         self._build_ui()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._on_tick)
+        self._timer.start(30)
 
     # ---------------- UI ----------------
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
 
-        # --- Top controls ---
-        top = QHBoxLayout()
+        # File bar
+        file_row = QHBoxLayout()
+        self._le_path = QLineEdit()
+        self._le_path.setReadOnly(True)
+        btn_browse = QPushButton("Open .log")
+        btn_browse.clicked.connect(self._on_browse)
+        file_row.addWidget(QLabel("Log:"))
+        file_row.addWidget(self._le_path, 1)
+        file_row.addWidget(btn_browse)
+        root.addLayout(file_row)
 
-        self.btn_load = QPushButton("Load LOG")
-        self.btn_load.clicked.connect(self._on_load_log)
-        top.addWidget(self.btn_load)
+        # Controls
+        ctrl_box = QGroupBox("Playback")
+        ctrl = QHBoxLayout(ctrl_box)
 
-        self.lbl_file = QLabel("No file")
-        self.lbl_file.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        top.addWidget(self.lbl_file, 1)
+        self._btn_play = QPushButton("Play")
+        self._btn_play.clicked.connect(self._toggle_play)
+        btn_restart = QPushButton("Restart")
+        btn_restart.clicked.connect(self._restart)
 
-        self.chk_loop = QCheckBox("Loop")
-        self.chk_loop.setChecked(True)
-        self.chk_loop.stateChanged.connect(lambda _: self._set_loop())
-        top.addWidget(self.chk_loop)
+        self._cb_loop = QCheckBox("Loop")
+        self._cb_loop.setChecked(True)
+        self._cb_loop.stateChanged.connect(lambda _: self._sync_loop())
 
-        top.addWidget(QLabel("Speed:"))
-        self.cmb_speed = QComboBox()
-        self.cmb_speed.addItems(["0.25x", "0.5x", "1x", "2x", "4x", "8x"])
-        self.cmb_speed.setCurrentText("1x")
-        self.cmb_speed.currentTextChanged.connect(self._set_speed)
-        top.addWidget(self.cmb_speed)
+        self._cb_speed = QComboBox()
+        self._cb_speed.addItems(["0.25x", "0.5x", "1x", "2x", "4x", "8x", "16x", "32x"])
+        self._cb_speed.setCurrentText("1x")
+        self._cb_speed.currentTextChanged.connect(self._sync_speed)
 
-        self.btn_play = QPushButton("Play")
-        self.btn_play.clicked.connect(self._toggle_play)
-        top.addWidget(self.btn_play)
+        ctrl.addWidget(self._btn_play)
+        ctrl.addWidget(btn_restart)
+        ctrl.addWidget(self._cb_loop)
+        ctrl.addWidget(QLabel("Speed:"))
+        ctrl.addWidget(self._cb_speed)
+        ctrl.addStretch(1)
 
-        self.btn_rewind = QPushButton("Rewind")
-        self.btn_rewind.clicked.connect(self._rewind)
-        top.addWidget(self.btn_rewind)
+        root.addWidget(ctrl_box)
 
-        root.addLayout(top)
-
-        # --- Search + selection + plot ---
+        # Selection + plot
         mid = QHBoxLayout()
 
         left = QVBoxLayout()
-        search_row = QHBoxLayout()
-        search_row.addWidget(QLabel("Filter:"))
-        self.le_filter = QLineEdit()
-        self.le_filter.setPlaceholderText("Type to filter signals")
-        self.le_filter.textChanged.connect(self._apply_filter)
-        search_row.addWidget(self.le_filter, 1)
-        left.addLayout(search_row)
+        flt_row = QHBoxLayout()
+        self._le_filter = QLineEdit()
+        self._le_filter.setPlaceholderText("Filter series (name or 0xID:Signal)")
+        self._le_filter.textChanged.connect(self._apply_filter)
+        flt_row.addWidget(QLabel("Filter:"))
+        flt_row.addWidget(self._le_filter)
+        left.addLayout(flt_row)
 
-        self.list_sig = QListWidget()
-        self.list_sig.setSelectionMode(QAbstractItemView.NoSelection)
-        self.list_sig.itemChanged.connect(self._on_item_changed)
-        left.addWidget(self.list_sig, 1)
+        self._list = QListWidget()
+        self._list.itemChanged.connect(self._on_series_toggled)
+        left.addWidget(self._list, 1)
 
-        btns = QHBoxLayout()
-        self.btn_all = QPushButton("All")
-        self.btn_none = QPushButton("None")
-        self.btn_all.clicked.connect(lambda: self._select_all(True))
-        self.btn_none.clicked.connect(lambda: self._select_all(False))
-        btns.addWidget(self.btn_all)
-        btns.addWidget(self.btn_none)
-        left.addLayout(btns)
+        btn_sel_all = QPushButton("Select all")
+        btn_sel_none = QPushButton("Select none")
+        btn_sel_all.clicked.connect(lambda: self._set_all_checked(True))
+        btn_sel_none.clicked.connect(lambda: self._set_all_checked(False))
+
+        sel_row = QHBoxLayout()
+        sel_row.addWidget(btn_sel_all)
+        sel_row.addWidget(btn_sel_none)
+        left.addLayout(sel_row)
 
         mid.addLayout(left, 0)
 
-        self.plot = pg.PlotWidget(title="Signal Player")
-        self.plot.setLabel('bottom', 'Time', units='s')
-        self.plot.setLabel('left', 'Value')
-        self.plot.addLegend()
-        mid.addWidget(self.plot, 1)
+        self._plot = pg.PlotWidget(title="Signal Player")
+        self._plot.setLabel("bottom", "t", units="s")
+        self._plot.setLabel("left", "value")
+        self._plot.addLegend()
+        mid.addWidget(self._plot, 1)
 
         root.addLayout(mid, 1)
 
-    # ---------------- Parsing ----------------
-    def _on_load_log(self) -> None:
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open LOG file",
-            "",
-            "LOG files (*.log *.txt);;All files (*)"
-        )
-        if not file_path:
-            return
+    # ---------------- events ----------------
+    def _on_browse(self) -> None:
+        start_dir = os.path.dirname(self._log_path) if self._log_path else os.getcwd()
+        path, _ = QFileDialog.getOpenFileName(self, "Select LOG file", start_dir, "Log files (*.log);;All files (*.*)")
+        if path:
+            self.load_log(path)
 
-        self.load_log(file_path)
+    def load_log(self, path: str) -> None:
+        self._log_path = path
+        self._le_path.setText(path)
 
-    def load_log(self, file_path: str) -> None:
-        self.lbl_file.setText(os.path.basename(file_path))
+        self._data, self._series = _LogParser.parse_file(path)
+        self._rebuild_series_list()
 
-        events: List[LogEvent] = []
-        sigs = set()
+        # determine end time over selected series
+        self._t_end_s = 0.0
+        for pts in self._data.values():
+            if pts:
+                self._t_end_s = max(self._t_end_s, pts[-1].t_s)
 
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
-            for line in fh:
-                ev = self._parse_line(line)
-                if ev is None:
-                    continue
-                events.append(ev)
-                sigs.add(ev.sig)
+        self._restart()
+        self._plot.clear()
+        self._plot.addLegend()
+        self._curves.clear()
 
-        events.sort(key=lambda e: e.t_sec)
-        self._events = events
-        self._sig_set = sorted(list(sigs), key=lambda s: s.lower())
-
-        self._selected = {s: False for s in self._sig_set}
-        self._rebuild_signal_list()
-
-        self._rewind()
-        self._clear_plot()
-
-    def _parse_line(self, line: str) -> Optional[LogEvent]:
-        """
-        Robust parsing:
-        - Ignore empty lines.
-        - Find the first token that looks like a number => time
-        - Next token => signal
-        - Next token => raw
-        - Remainder => value (numeric or enum string)
-        """
-        s = line.strip()
-        if not s:
-            return None
-
-        parts = s.split()
-        if len(parts) < 4:
-            return None
-
-        # find index of the time token (first numeric)
-        idx_t = None
-        for i, p in enumerate(parts):
-            if self._RE_NUM.match(p):
-                idx_t = i
-                break
-        if idx_t is None:
-            return None
-        if len(parts) <= idx_t + 2:
-            return None
-
-        t_tok = parts[idx_t]
-        sig_tok = parts[idx_t + 1]
-        raw_tok = parts[idx_t + 2]
-        val_tok = " ".join(parts[idx_t + 3:])  # may contain spaces
-
-        if not self._RE_NUM.match(raw_tok):
-            return None
-
-        try:
-            t = float(t_tok)
-            raw = float(raw_tok)
-        except ValueError:
-            return None
-
-        # value: numeric -> float, else fallback to raw for plotting
-        val_is_raw_fallback = False
-        if self._RE_NUM.match(val_tok):
-            try:
-                val = float(val_tok)
-            except ValueError:
-                val = raw
-                val_is_raw_fallback = True
-        else:
-            val = raw
-            val_is_raw_fallback = True
-
-        # normalize time -> seconds relative
-        t_sec = self._normalize_time_to_seconds(t)
-
-        return LogEvent(t_sec=t_sec, sig=sig_tok, raw=raw, val=val, val_is_raw_fallback=val_is_raw_fallback)
-
-    def _normalize_time_to_seconds(self, t: float) -> float:
-        """
-        Heuristic:
-        - If values look like ns (very large): use /1e9
-        - If values look like us: /1e6
-        - If values look like ms: /1e3
-        - Else assume already seconds.
-        """
-        at = abs(t)
-        if at >= 1e12:
-            return t / 1e9
-        if at >= 1e9:
-            # ambiguous; most of your timestamps here are ns-like from drivers
-            return t / 1e9
-        if at >= 1e6:
-            return t / 1e3  # likely ms in log (e.g. serial: (ns)/1e6 => ms)
-        if at >= 1e3:
-            return t / 1e3  # ms
-        return t
-
-    # ---------------- Selection ----------------
-    def _rebuild_signal_list(self) -> None:
-        self.list_sig.blockSignals(True)
-        self.list_sig.clear()
-
-        for sig in self._sig_set:
-            item = QListWidgetItem(sig)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if self._selected.get(sig, False) else Qt.Unchecked)
-            self.list_sig.addItem(item)
-
-        self.list_sig.blockSignals(False)
-        self._apply_filter()
-
-    def _apply_filter(self) -> None:
-        q = self.le_filter.text().strip().lower()
-        for i in range(self.list_sig.count()):
-            it = self.list_sig.item(i)
-            name = it.text().lower()
-            it.setHidden(bool(q) and (q not in name))
-
-    def _on_item_changed(self, item: QListWidgetItem) -> None:
-        sig = item.text()
-        self._selected[sig] = (item.checkState() == Qt.Checked)
-        self._sync_curves_with_selection()
-
-    def _select_all(self, checked: bool) -> None:
-        self.list_sig.blockSignals(True)
-        for i in range(self.list_sig.count()):
-            it = self.list_sig.item(i)
-            it.setCheckState(Qt.Checked if checked else Qt.Unchecked)
-            self._selected[it.text()] = checked
-        self.list_sig.blockSignals(False)
-        self._sync_curves_with_selection()
-
-    # ---------------- Playback ----------------
-    def _set_loop(self) -> None:
-        self._loop = self.chk_loop.isChecked()
-
-    def _set_speed(self, txt: str) -> None:
-        try:
-            self._speed = float(txt.replace("x", ""))
-        except ValueError:
-            self._speed = 1.0
+        # auto-select nothing initially (user chooses)
+        self._set_all_checked(False)
 
     def _toggle_play(self) -> None:
         self._playing = not self._playing
-        self.btn_play.setText("Pause" if self._playing else "Play")
+        self._t_ref = None
+        self._btn_play.setText("Pause" if self._playing else "Play")
 
-    def _rewind(self) -> None:
-        self._play_idx = 0
-        self._t0 = None
-        for sig in self._curves.keys():
-            self._curves[sig]["times"].clear()
-            self._curves[sig]["values"].clear()
-            self._curves[sig]["curve"].setData([], [])
+    def _restart(self) -> None:
+        self._play_pos_s = 0.0
+        self._t_ref = None
+        self._redraw_all()
 
-    def _tick(self) -> None:
-        if (not self._playing) or (not self._events):
+    def _sync_loop(self) -> None:
+        self._loop = self._cb_loop.isChecked()
+
+    def _sync_speed(self, text: str) -> None:
+        # text like "2x"
+        sp = 1.0
+        try:
+            sp = float(text.replace("x", ""))
+        except Exception:
+            sp = 1.0
+        self._speed = sp
+
+    def _apply_filter(self) -> None:
+        q = self._le_filter.text().strip().lower()
+        for i in range(self._list.count()):
+            it = self._list.item(i)
+            name = (it.text() or "").lower()
+            it.setHidden(bool(q) and (q not in name))
+
+    def _rebuild_series_list(self) -> None:
+        self._list.blockSignals(True)
+        self._list.clear()
+        for s in self._series:
+            it = QListWidgetItem(s)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Unchecked)
+            self._list.addItem(it)
+        self._list.blockSignals(False)
+        self._apply_filter()
+
+    def _set_all_checked(self, checked: bool) -> None:
+        self._list.blockSignals(True)
+        state = Qt.Checked if checked else Qt.Unchecked
+        for i in range(self._list.count()):
+            it = self._list.item(i)
+            it.setCheckState(state)
+        self._list.blockSignals(False)
+        self._on_selection_changed()
+
+    def _on_series_toggled(self, _: QListWidgetItem) -> None:
+        self._on_selection_changed()
+
+    def _on_selection_changed(self) -> None:
+        # rebuild curves to match checked items
+        checked = []
+        for i in range(self._list.count()):
+            it = self._list.item(i)
+            if it.checkState() == Qt.Checked and not it.isHidden():
+                checked.append(it.text())
+
+        # Remove curves not selected
+        for name in list(self._curves.keys()):
+            if name not in checked:
+                self._plot.removeItem(self._curves[name])
+                del self._curves[name]
+
+        # Add missing curves
+        for name in checked:
+            if name in self._curves:
+                continue
+            curve = self._plot.plot([], [], name=name, pen=pg.intColor(len(self._curves)))
+            self._curves[name] = curve
+
+        self._redraw_all()
+
+    def _redraw_all(self) -> None:
+        # display points up to play position
+        for name, curve in self._curves.items():
+            pts = self._data.get(name, [])
+            if not pts:
+                curve.setData([], [])
+                continue
+
+            xs = []
+            ys = []
+            for p in pts:
+                if p.t_s <= self._play_pos_s:
+                    xs.append(p.t_s)
+                    ys.append(p.val)
+                else:
+                    break
+            curve.setData(xs, ys)
+
+    def _on_tick(self) -> None:
+        if not self._playing:
+            return
+        if not self._curves:
+            return
+        if self._t_end_s <= 0.0:
             return
 
-        # establish t0 once
-        if self._t0 is None:
-            self._t0 = self._events[0].t_sec
+        now = time.perf_counter()
+        if self._t_ref is None:
+            self._t_ref = now
+            return
 
-        # advance playhead based on real-time timer interval
-        dt = (self._timer.interval() / 1000.0) * self._speed
-        playhead = (self._events[self._play_idx].t_sec - self._t0) if self._play_idx < len(self._events) else 0.0
-        target = playhead + dt
+        dt = (now - self._t_ref) * self._speed
+        self._t_ref = now
+        self._play_pos_s += dt
 
-        # consume events until we reach target time
-        while self._play_idx < len(self._events):
-            ev = self._events[self._play_idx]
-            t_rel = ev.t_sec - self._t0
-            if t_rel > target:
-                break
-
-            if self._selected.get(ev.sig, False) and ev.sig in self._curves:
-                data = self._curves[ev.sig]
-                data["times"].append(t_rel)
-                data["values"].append(ev.val)
-
-            self._play_idx += 1
-
-        # update curves
-        for sig, data in self._curves.items():
-            if len(data["times"]) > 1:
-                data["curve"].setData(data["times"], data["values"])
-
-        # end reached
-        if self._play_idx >= len(self._events):
+        if self._play_pos_s >= self._t_end_s:
             if self._loop:
-                self._rewind()
+                self._play_pos_s = 0.0
             else:
+                self._play_pos_s = self._t_end_s
                 self._playing = False
-                self.btn_play.setText("Play")
+                self._btn_play.setText("Play")
 
-    def _sync_curves_with_selection(self) -> None:
-        # remove unchecked
-        for sig in list(self._curves.keys()):
-            if not self._selected.get(sig, False):
-                self.plot.removeItem(self._curves[sig]["curve"])
-                del self._curves[sig]
-
-        # add checked
-        for sig, en in self._selected.items():
-            if en and sig not in self._curves:
-                curve = self.plot.plot([], [], pen=pg.intColor(len(self._curves)), name=sig)
-                self._curves[sig] = {"curve": curve, "times": [], "values": []}
-
-        # on selection change, rewind to avoid mixing old state
-        self._rewind()
-
-    def _clear_plot(self) -> None:
-        for sig in list(self._curves.keys()):
-            self.plot.removeItem(self._curves[sig]["curve"])
-        self._curves = {}
+        self._redraw_all()
